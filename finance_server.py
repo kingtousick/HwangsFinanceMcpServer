@@ -1,0 +1,185 @@
+"""Finance MCP Server — 로컬 실행 금융 시세 조회 (FastMCP, stdio).
+
+소스 우선순위(환경 적응형 강등):
+  국내 지수/종목/ETF : 네이버 polling → KRX MDC → Playwright
+  미국 주식/지수      : Yahoo chart(query1 → query2)
+  USD/KRW 환율        : Yahoo(KRW=X) → EXIM(키) → 네이버
+  크립토 KRW/USD      : CoinGecko → 업비트(KRW, 도달 시)
+
+모든 Tool은 정규화 dict(§5)를 반환하며, 전 소스 실패 시 {error, source:"fallback"}.
+로그는 stderr만 사용(stdout은 MCP 전용).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+from typing import Awaitable, Callable
+
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+
+from core.cache import cached
+from core.schema import fail
+from sources import naver, yahoo, coingecko, upbit, exim, playwright_fb
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,  # stdout 오염 금지
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("finance-mcp")
+
+mcp = FastMCP("finance")
+
+
+async def _cascade(name: str, *fetchers: Callable[[], Awaitable[dict]]) -> dict:
+    """소스 순서대로 시도, 첫 성공을 반환. 전부 실패 시 fail()."""
+    last_exc: Exception | None = None
+    for fetch in fetchers:
+        try:
+            return await fetch()
+        except Exception as e:  # noqa: BLE001 - 다음 소스로 강등
+            last_exc = e
+            logger.warning("source failed for %s: %s", name, e)
+    return fail(name, last_exc or "all sources failed")
+
+
+# ---------------------------------------------------------------- 국내 지수
+
+
+@mcp.tool()
+async def get_kospi() -> dict:
+    """KOSPI 지수 실시간(정규화). 1순위 네이버 polling, 실패 시 Playwright 강등."""
+    async def fetch():
+        return await _cascade(
+            "KOSPI",
+            lambda: naver.get_index("KOSPI"),
+            lambda: playwright_fb.get_index("KOSPI"),
+        )
+    return await cached("kospi", fetch)
+
+
+@mcp.tool()
+async def get_kosdaq() -> dict:
+    """KOSDAQ 지수 실시간(정규화). 1순위 네이버 polling."""
+    async def fetch():
+        return await _cascade(
+            "KOSDAQ",
+            lambda: naver.get_index("KOSDAQ"),
+            lambda: playwright_fb.get_index("KOSDAQ"),
+        )
+    return await cached("kosdaq", fetch)
+
+
+# ---------------------------------------------------------------- 환율
+
+
+@mcp.tool()
+async def get_exchange_rate(pair: str = "USD/KRW") -> dict:
+    """환율 조회. 예: 'USD/KRW'. 1순위 Yahoo(KRW=X), EXIM(키)·네이버 폴백.
+
+    현재 Yahoo 'KRW=X'(USD/KRW)만 1급 지원. 다른 통화쌍은 Yahoo 심볼 규칙을 따른다.
+    """
+    base, _, quote = pair.partition("/")
+    base = base.upper() or "USD"
+
+    if base == "USD":
+        symbol = "KRW=X"
+    else:
+        symbol = f"{base}KRW=X"
+
+    async def fetch():
+        return await _cascade(
+            pair,
+            lambda: yahoo.get_quote(symbol, name=pair),
+            lambda: exim.get_rate(base),
+        )
+    return await cached(f"fx:{pair}", fetch)
+
+
+# ---------------------------------------------------------------- 주식/지수
+
+
+@mcp.tool()
+async def get_stock_price(ticker: str) -> dict:
+    """국내/해외 주식·지수 시세.
+
+    티커 형식:
+      - 국내 6자리 코드(예: '005930') → 네이버
+      - Yahoo 심볼(예: '^GSPC', '^IXIC', '^SOX', 'AAPL') → Yahoo
+    """
+    is_domestic = ticker.isdigit() and len(ticker) == 6
+
+    async def fetch():
+        if is_domestic:
+            return await _cascade(ticker, lambda: naver.get_stock(ticker))
+        return await _cascade(ticker, lambda: yahoo.get_quote(ticker))
+    return await cached(f"stock:{ticker}", fetch)
+
+
+@mcp.tool()
+async def get_etf_price(code: str) -> dict:
+    """KRX ETF 시세. code는 6자리 코드(예: '381180' TIGER 미국필라델피아반도체나스닥).
+
+    1순위 네이버 polling(국내 종목과 동일 엔드포인트).
+    """
+    async def fetch():
+        return await _cascade(code, lambda: naver.get_stock(code))
+    return await cached(f"etf:{code}", fetch)
+
+
+# ---------------------------------------------------------------- 크립토
+
+
+@mcp.tool()
+async def get_crypto(symbol: str = "BTC", quote: str = "KRW") -> dict:
+    """크립토 시세. 1순위 CoinGecko(KRW·USD 직접), KRW은 업비트 폴백(도달 시).
+
+    symbol 예: 'BTC', 'ETH'. quote: 'KRW' 또는 'USD'.
+    """
+    q = quote.upper()
+
+    async def fetch():
+        fetchers = [lambda: coingecko.get_price(symbol, q)]
+        if q == "KRW":
+            fetchers.append(lambda: upbit.get_price(symbol))
+        return await _cascade(symbol.upper(), *fetchers)
+    return await cached(f"crypto:{symbol.upper()}:{q}", fetch)
+
+
+# ---------------------------------------------------------------- 스냅샷
+
+
+@mcp.tool()
+async def get_market_snapshot() -> dict:
+    """데일리 리포트용 핵심 지표 일괄 조회.
+
+    KOSPI·KOSDAQ·USD/KRW·S&P500(^GSPC)·나스닥(^IXIC)·SOX(^SOX)·BTC·ETH를
+    병렬 조회해 정규화 리스트로 반환. 일부 실패해도 가능한 것만 채운다.
+    """
+    tasks = {
+        "KOSPI": get_kospi(),
+        "KOSDAQ": get_kosdaq(),
+        "USD/KRW": get_exchange_rate("USD/KRW"),
+        "S&P500": get_stock_price("^GSPC"),
+        "NASDAQ": get_stock_price("^IXIC"),
+        "SOX": get_stock_price("^SOX"),
+        "BTC": get_crypto("BTC", "KRW"),
+        "ETH": get_crypto("ETH", "KRW"),
+    }
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    items = []
+    for key, res in zip(tasks.keys(), results):
+        if isinstance(res, Exception):
+            items.append(fail(key, res))
+        else:
+            items.append(res)
+    return {"snapshot": items, "count": len(items)}
+
+
+if __name__ == "__main__":
+    mcp.run()
