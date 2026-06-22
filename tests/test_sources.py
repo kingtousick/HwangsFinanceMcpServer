@@ -111,6 +111,46 @@ async def test_cache_prevents_second_call():
     assert route.call_count == 1
 
 
+MOLIT_TRADE = ("https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/"
+               "getRTMSDataSvcAptTradeDev")
+
+_MOLIT_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<response><header><resultCode>000</resultCode><resultMsg>OK</resultMsg></header>
+<body><items>
+<item><aptNm>래미안</aptNm><dealAmount>250,000</dealAmount>
+<dealYear>2024</dealYear><dealMonth>6</dealMonth><dealDay>15</dealDay>
+<excluUseAr>84.97</excluUseAr><floor>10</floor><buildYear>2005</buildYear>
+<umdNm>역삼동</umdNm><jibun>700</jibun></item>
+<item><aptNm>개포자이</aptNm><dealAmount>310,000</dealAmount>
+<dealYear>2024</dealYear><dealMonth>6</dealMonth><dealDay>3</dealDay>
+<excluUseAr>59.92</excluUseAr><floor>7</floor><buildYear>2019</buildYear>
+<umdNm>개포동</umdNm><jibun>12</jibun></item>
+</items><numOfRows>10</numOfRows><pageNo>1</pageNo><totalCount>2</totalCount></body>
+</response>"""
+
+
+@respx.mock
+async def test_apt_trade_ok(monkeypatch):
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    respx.get(MOLIT_TRADE).mock(return_value=httpx.Response(200, text=_MOLIT_XML))
+    res = await srv.get_apt_trade("11680", "202406")
+    assert res["source"] == "molit"
+    assert res["count"] == 2
+    first = res["items"][0]
+    assert first["apt"] == "래미안"
+    assert first["deal_amount"] == 250000  # 만원
+    assert first["area"] == pytest.approx(84.97)
+    assert first["floor"] == 10
+    assert first["date"] == "2024-06-15"
+
+
+async def test_apt_trade_no_key_returns_fallback(monkeypatch):
+    monkeypatch.delenv("MOLIT_API_KEY", raising=False)
+    res = await srv.get_apt_trade("11680", "202406")
+    assert "error" in res
+    assert res["source"] == "fallback"
+
+
 @respx.mock
 async def test_snapshot_returns_eight():
     respx.get(NAVER_KOSPI).mock(return_value=httpx.Response(200, json=_naver_payload()))

@@ -80,3 +80,23 @@ async def get_json(url: str, *, params: dict | None = None,
             logger.warning("GET fail url=%s attempt=%d %.0fms err=%s",
                            url, attempt, (time.perf_counter() - t0) * 1000, e)
     raise last_exc  # type: ignore[misc]
+
+
+async def get_text(url: str, *, params: dict | None = None,
+                   headers: dict | None = None, retries: int = 1) -> str:
+    """GET 후 본문 텍스트 반환(XML 응답 API용). retries회 재시도, 최종 실패 시 예외."""
+    client = get_client()
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        t0 = time.perf_counter()
+        try:
+            r = await client.get(url, params=params, headers=headers)
+            r.raise_for_status()
+            logger.info("GET ok url=%s attempt=%d %.0fms",
+                        url, attempt, (time.perf_counter() - t0) * 1000)
+            return r.text
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            logger.warning("GET fail url=%s attempt=%d %.0fms err=%s",
+                           url, attempt, (time.perf_counter() - t0) * 1000, e)
+    raise last_exc  # type: ignore[misc]
