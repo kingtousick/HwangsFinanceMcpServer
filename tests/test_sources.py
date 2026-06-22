@@ -178,6 +178,19 @@ async def test_apt_trade_summary_groups(monkeypatch):
     assert all("avg_price_per_pyeong" in c for c in res["items"])
 
 
+@respx.mock
+async def test_apt_trade_summary_multi_month(monkeypatch):
+    """months=3이면 3개월 거래가 합산돼 단지별 건수가 누적된다."""
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    respx.get(MOLIT_TRADE).mock(return_value=httpx.Response(200, text=_MOLIT_XML))
+    res = await srv.get_apt_trade_summary("강남구", "2026-04", months=3)
+    assert res["months"] == 3
+    assert res["period"] == "202602~202604"
+    assert res["deal_count"] == 6              # 2건 × 3개월
+    assert res["complex_count"] == 2           # 단지는 여전히 2개
+    assert res["items"][0]["count"] == 3       # 단지별 3건으로 누적
+
+
 MOLIT_RENT = ("https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/"
               "getRTMSDataSvcAptRent")
 

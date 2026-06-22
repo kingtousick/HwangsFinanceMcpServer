@@ -188,12 +188,15 @@ async def get_apt_trade(region: str, deal_ym: str, rows: int = 50) -> dict:
 
 
 @mcp.tool()
-async def get_apt_trade_summary(region: str, deal_ym: str, rows: int = 1000) -> dict:
+async def get_apt_trade_summary(region: str, deal_ym: str, months: int = 1,
+                                rows: int = 1000) -> dict:
     """아파트 매매 실거래가를 단지별 평균 평당가로 집계. MOLIT_API_KEY 필요.
 
-    region: 지역명 또는 5자리 코드(get_apt_trade와 동일). deal_ym: 'YYYYMM'/'YYYY-MM'.
-    해당 월 거래를 (법정동, 단지)별로 묶어 평균 평당가 내림차순으로 반환.
-    반환: {name, region_code, deal_ym, complex_count, deal_count,
+    region: 지역명 또는 5자리 코드(get_apt_trade와 동일). deal_ym: 기준월 'YYYYMM'/'YYYY-MM'.
+    months: 기준월 포함 직전 N개월을 합산(기본 1, 최대 12). 거래가 적은 지역/단지의
+            평균을 안정적으로 내려면 months=3~6 사용.
+    거래를 (법정동, 단지)별로 묶어 평균 평당가 내림차순으로 반환.
+    반환: {name, region_code, deal_ym, months, period, complex_count, deal_count,
           items:[{apt, dong, count, avg_price_per_pyeong, min_price_per_pyeong,
                   max_price_per_pyeong, avg_deal_amount, avg_pyeong}], source}.
     평당가는 전용면적 기준.
@@ -206,10 +209,10 @@ async def get_apt_trade_summary(region: str, deal_ym: str, rows: int = 1000) -> 
 
     async def fetch():
         return await _cascade(
-            f"단지별평당가:{code}:{ym}",
-            lambda: molit.apt_trade_summary(code, ym, rows),
+            f"단지별평당가:{code}:{ym}:{months}",
+            lambda: molit.apt_trade_summary(code, ym, rows, months),
         )
-    return await cached(f"apt_trade_summary:{code}:{ym}:{rows}", fetch)
+    return await cached(f"apt_trade_summary:{code}:{ym}:{months}:{rows}", fetch)
 
 
 @mcp.tool()

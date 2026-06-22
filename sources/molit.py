@@ -193,16 +193,35 @@ def summarize_trades(items: list[dict]) -> list[dict]:
     return out
 
 
-async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000) -> dict:
-    """단지별 평균 평당가 집계. 의미있는 평균을 위해 기본 rows=1000(해당 월 전량)."""
-    base = await apt_trade(region_code, deal_ym, rows)
-    summary = summarize_trades(base["items"])
+async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
+                            months: int = 1) -> dict:
+    """단지별 평균 평당가 집계. 의미있는 평균을 위해 기본 rows=1000(해당 월 전량).
+
+    months>1이면 기준월 포함 직전 N개월(최대 12) 매매 거래를 합산해 평균을 낸다.
+    일부 월 실패는 건너뛰고, 전부 실패 시에만 예외를 올려 상위에서 fallback.
+    """
+    months = max(1, min(12, months))
+    yms = _months_back(deal_ym, months)
+    results = await asyncio.gather(
+        *(apt_trade(region_code, ym, rows) for ym in yms),
+        return_exceptions=True,
+    )
+    trade_items: list[dict] = []
+    errors: list[Exception] = []
+    for res in results:
+        errors.append(res) if isinstance(res, Exception) else trade_items.extend(res["items"])
+    if not trade_items and errors:
+        raise errors[0]
+
+    summary = summarize_trades(trade_items)
     return {
         "name": "아파트매매 단지별 평균평당가",
         "region_code": region_code,
         "deal_ym": deal_ym,
+        "months": months,
+        "period": f"{yms[-1]}~{yms[0]}" if months > 1 else deal_ym,
         "complex_count": len(summary),
-        "deal_count": base["count"],
+        "deal_count": len(trade_items),
         "items": summary,
         "source": "molit",
     }
