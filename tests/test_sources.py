@@ -144,11 +144,50 @@ async def test_apt_trade_ok(monkeypatch):
     assert first["date"] == "2024-06-15"
 
 
+@respx.mock
+async def test_apt_trade_region_name_and_ym_normalize(monkeypatch):
+    """지역명 '서울 강남구' → 11680 변환, 'YYYY-MM' 정규화."""
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    route = respx.get(MOLIT_TRADE).mock(
+        return_value=httpx.Response(200, text=_MOLIT_XML))
+    res = await srv.get_apt_trade("서울 강남구", "2024-06")
+    assert res["region_code"] == "11680"
+    assert res["deal_ym"] == "202406"
+    assert route.calls[0].request.url.params["LAWD_CD"] == "11680"
+    assert route.calls[0].request.url.params["DEAL_YMD"] == "202406"
+
+
+async def test_apt_trade_ambiguous_region_returns_fallback():
+    """'중구'는 여러 시도에 있어 변환 실패 → fallback."""
+    res = await srv.get_apt_trade("중구", "202406")
+    assert "error" in res
+    assert res["source"] == "fallback"
+    assert "여러 지역" in res["error"]
+
+
 async def test_apt_trade_no_key_returns_fallback(monkeypatch):
     monkeypatch.delenv("MOLIT_API_KEY", raising=False)
     res = await srv.get_apt_trade("11680", "202406")
     assert "error" in res
     assert res["source"] == "fallback"
+
+
+def test_resolve_region():
+    from sources.region_codes import resolve_region
+    assert resolve_region("11680") == "11680"
+    assert resolve_region("1168010100") == "11680"        # 10자리 → 앞 5자리
+    assert resolve_region("강남구") == "11680"
+    assert resolve_region("서울 강남구") == "11680"
+    assert resolve_region("서울특별시 강남구") == "11680"
+    assert resolve_region("수원 영통구") == "41117"
+    assert resolve_region("영통구") == "41117"
+    assert resolve_region("성남 분당구") == "41135"
+    assert resolve_region("세종") == "36110"
+    assert resolve_region("부천") == "41190"
+    with pytest.raises(ValueError):
+        resolve_region("중구")          # 모호
+    with pytest.raises(ValueError):
+        resolve_region("없는동네구")     # 미수록
 
 
 @respx.mock

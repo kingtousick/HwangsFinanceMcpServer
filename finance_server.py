@@ -23,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from core.cache import cached
 from core.schema import fail
 from sources import naver, yahoo, coingecko, upbit, exim, playwright_fb, molit
+from sources.region_codes import resolve_region
 
 load_dotenv()
 
@@ -154,38 +155,57 @@ async def get_crypto(symbol: str = "BTC", quote: str = "KRW") -> dict:
 # ---------------------------------------------------------------- 부동산 실거래가
 
 
+def _normalize_ym(deal_ym: str) -> str:
+    """'2026-04', '2026.04', '202604' → '202604'."""
+    return deal_ym.replace("-", "").replace(".", "").replace("/", "").strip()
+
+
 @mcp.tool()
-async def get_apt_trade(region_code: str, deal_ym: str, rows: int = 50) -> dict:
+async def get_apt_trade(region: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 매매 실거래가(국토교통부 공공데이터포털). MOLIT_API_KEY 필요.
 
-    region_code: 5자리 시군구 법정동코드(예: 강남구 '11680', 송파구 '11710',
-                 수원 영통구 '41117'). 법정동코드 전체목록은 행정표준코드관리시스템 참고.
-    deal_ym: 계약 년월 'YYYYMM' (예: '202406').
+    region: 지역명 또는 5자리 시군구 법정동코드. 자동 변환 지원 —
+            '강남구', '서울 강남구', '수원 영통구', '세종', '11680' 모두 가능.
+            모호하면(예: '중구') 시도를 함께 지정('서울 중구').
+    deal_ym: 계약 년월. 'YYYYMM'/'YYYY-MM' 모두 허용(예: '202406', '2024-06').
     반환: {name, region_code, deal_ym, count, items:[{apt, deal_amount(만원),
           area, floor, build_year, dong, jibun, date}], source}.
     """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"아파트매매:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
     async def fetch():
         return await _cascade(
-            f"아파트매매:{region_code}:{deal_ym}",
-            lambda: molit.apt_trade(region_code, deal_ym, rows),
+            f"아파트매매:{code}:{ym}",
+            lambda: molit.apt_trade(code, ym, rows),
         )
-    return await cached(f"apt_trade:{region_code}:{deal_ym}:{rows}", fetch)
+    return await cached(f"apt_trade:{code}:{ym}:{rows}", fetch)
 
 
 @mcp.tool()
-async def get_apt_rent(region_code: str, deal_ym: str, rows: int = 50) -> dict:
+async def get_apt_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 전월세 실거래가(국토교통부 공공데이터포털). MOLIT_API_KEY 필요.
 
-    region_code: 5자리 시군구 법정동코드. deal_ym: 'YYYYMM'.
+    region: 지역명 또는 5자리 코드(자동 변환, get_apt_trade와 동일).
+    deal_ym: 'YYYYMM'/'YYYY-MM'.
     반환 items: {apt, deposit(보증금 만원), monthly_rent(월세 만원, 0이면 전세),
                 area, floor, build_year, dong, jibun, date}.
     """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"아파트전월세:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
     async def fetch():
         return await _cascade(
-            f"아파트전월세:{region_code}:{deal_ym}",
-            lambda: molit.apt_rent(region_code, deal_ym, rows),
+            f"아파트전월세:{code}:{ym}",
+            lambda: molit.apt_rent(code, ym, rows),
         )
-    return await cached(f"apt_rent:{region_code}:{deal_ym}:{rows}", fetch)
+    return await cached(f"apt_rent:{code}:{ym}:{rows}", fetch)
 
 
 # ---------------------------------------------------------------- 스냅샷
