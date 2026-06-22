@@ -236,6 +236,32 @@ async def get_apt_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
     return await cached(f"apt_rent:{code}:{ym}:{rows}", fetch)
 
 
+@mcp.tool()
+async def get_jeonse_ratio(region: str, deal_ym: str, rows: int = 1000) -> dict:
+    """단지별 전세가율 집계(전세가율 = 전세 보증금 평당가 ÷ 매매 평당가 × 100).
+    MOLIT_API_KEY 필요(매매·전월세 API 둘 다 활용신청 필요).
+
+    region: 지역명 또는 5자리 코드. deal_ym: 'YYYYMM'/'YYYY-MM'.
+    해당 월에 매매·전세(월세 제외)가 모두 있는 단지만 산출, 전세가율 내림차순.
+    반환: {name, region_code, deal_ym, matched_complex_count, avg_jeonse_ratio,
+          items:[{apt, dong, jeonse_ratio(%), sale_price_per_pyeong,
+                  jeonse_deposit_per_pyeong, jeonse_count}], source}.
+    주의: 단일 월 기준이라 매매·전세가 같은 달에 모두 발생한 단지만 매칭됨(표본 적을 수 있음).
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"전세가율:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
+    async def fetch():
+        return await _cascade(
+            f"전세가율:{code}:{ym}",
+            lambda: molit.jeonse_ratio_summary(code, ym, rows),
+        )
+    return await cached(f"jeonse_ratio:{code}:{ym}:{rows}", fetch)
+
+
 # ---------------------------------------------------------------- 스냅샷
 
 

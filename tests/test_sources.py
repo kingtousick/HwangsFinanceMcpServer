@@ -178,6 +178,51 @@ async def test_apt_trade_summary_groups(monkeypatch):
     assert all("avg_price_per_pyeong" in c for c in res["items"])
 
 
+MOLIT_RENT = ("https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/"
+              "getRTMSDataSvcAptRent")
+
+# 래미안(역삼동) 전세 보증금 15억 / 동일 전용 84.97㎡ → 매매 25억 대비 전세가율 60%
+_MOLIT_RENT_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<response><header><resultCode>000</resultCode><resultMsg>OK</resultMsg></header>
+<body><items>
+<item><aptNm>래미안</aptNm><deposit>150,000</deposit><monthlyRent>0</monthlyRent>
+<excluUseAr>84.97</excluUseAr><floor>5</floor><buildYear>2005</buildYear>
+<umdNm>역삼동</umdNm><jibun>700</jibun>
+<dealYear>2024</dealYear><dealMonth>6</dealMonth><dealDay>10</dealDay></item>
+<item><aptNm>래미안</aptNm><deposit>5,000</deposit><monthlyRent>200</monthlyRent>
+<excluUseAr>84.97</excluUseAr><floor>3</floor><buildYear>2005</buildYear>
+<umdNm>역삼동</umdNm><jibun>700</jibun>
+<dealYear>2024</dealYear><dealMonth>6</dealMonth><dealDay>12</dealDay></item>
+</items><numOfRows>10</numOfRows><pageNo>1</pageNo><totalCount>2</totalCount></body>
+</response>"""
+
+
+def test_jeonse_ratio():
+    from sources.molit import jeonse_ratio
+    trade = [{"dong": "역삼동", "apt": "A", "price_per_pyeong": 2000},
+             {"dong": "개포동", "apt": "B", "price_per_pyeong": 3000}]  # 매매만
+    rent = [{"dong": "역삼동", "apt": "A", "monthly_rent": 0, "deposit_per_pyeong": 1200},
+            {"dong": "역삼동", "apt": "A", "monthly_rent": 50, "deposit_per_pyeong": 9999},  # 월세 제외
+            {"dong": "수서동", "apt": "C", "monthly_rent": 0, "deposit_per_pyeong": 800}]   # 전세만
+    out = jeonse_ratio(trade, rent)
+    assert len(out) == 1                      # A만 매매·전세 모두 존재
+    assert out[0]["apt"] == "A"
+    assert out[0]["jeonse_ratio"] == 60.0     # 1200/2000*100
+    assert out[0]["jeonse_count"] == 1        # 월세 1건 제외
+
+
+@respx.mock
+async def test_get_jeonse_ratio_e2e(monkeypatch):
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    respx.get(MOLIT_TRADE).mock(return_value=httpx.Response(200, text=_MOLIT_XML))
+    respx.get(MOLIT_RENT).mock(return_value=httpx.Response(200, text=_MOLIT_RENT_XML))
+    res = await srv.get_jeonse_ratio("강남구", "2024-06")
+    assert res["source"] == "molit"
+    assert res["matched_complex_count"] == 1   # 래미안만 매칭
+    assert res["items"][0]["apt"] == "래미안"
+    assert res["items"][0]["jeonse_ratio"] == pytest.approx(60.0, abs=0.2)
+
+
 def test_per_pyeong():
     from sources.molit import _per_pyeong
     pyeong, ppp = _per_pyeong(250000, 84.97)

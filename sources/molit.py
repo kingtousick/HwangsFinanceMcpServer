@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import xml.etree.ElementTree as ET
 
@@ -211,3 +212,59 @@ async def apt_rent(region_code: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 전월세 실거래가. 보증금/월세(만원). 월세 0이면 전세."""
     return await _fetch(_RENT_URL, "아파트전월세실거래", region_code, deal_ym,
                         rows, _rent_item)
+
+
+def jeonse_ratio(trade_items: list[dict], rent_items: list[dict]) -> list[dict]:
+    """단지별 전세가율(%) = 전세 보증금 평당가 ÷ 매매 평당가 × 100.
+
+    평당가 기준이라 평형 차이에 영향받지 않는다. 월세(monthly_rent>0)는 제외하고
+    순수 전세만 사용. 같은 (법정동, 단지)에 매매·전세가 모두 있는 단지만 산출.
+    전세가율 내림차순 정렬.
+    """
+    sale = {(c["dong"], c["apt"]): c["avg_price_per_pyeong"]
+            for c in summarize_trades(trade_items)}
+
+    jeonse: dict[tuple, list[float]] = {}
+    for it in rent_items:
+        if (it.get("monthly_rent") or 0) != 0:      # 월세 제외(순수 전세만)
+            continue
+        if it.get("deposit_per_pyeong") is None:
+            continue
+        jeonse.setdefault((it.get("dong"), it.get("apt")), []).append(
+            it["deposit_per_pyeong"])
+
+    out: list[dict] = []
+    for key, dpps in jeonse.items():
+        sale_ppp = sale.get(key)
+        if not sale_ppp:
+            continue
+        avg_dpp = sum(dpps) / len(dpps)
+        out.append({
+            "apt": key[1],
+            "dong": key[0],
+            "jeonse_ratio": round(avg_dpp / sale_ppp * 100, 1),  # %
+            "sale_price_per_pyeong": sale_ppp,
+            "jeonse_deposit_per_pyeong": round(avg_dpp, 1),
+            "jeonse_count": len(dpps),
+        })
+    out.sort(key=lambda x: x["jeonse_ratio"], reverse=True)
+    return out
+
+
+async def jeonse_ratio_summary(region_code: str, deal_ym: str, rows: int = 1000) -> dict:
+    """단지별 전세가율 집계. 매매·전월세 API를 병렬 호출해 매칭."""
+    trade, rent = await asyncio.gather(
+        apt_trade(region_code, deal_ym, rows),
+        apt_rent(region_code, deal_ym, rows),
+    )
+    items = jeonse_ratio(trade["items"], rent["items"])
+    avg = round(sum(x["jeonse_ratio"] for x in items) / len(items), 1) if items else None
+    return {
+        "name": "아파트 전세가율",
+        "region_code": region_code,
+        "deal_ym": deal_ym,
+        "matched_complex_count": len(items),
+        "avg_jeonse_ratio": avg,
+        "items": items,
+        "source": "molit",
+    }
