@@ -64,6 +64,23 @@ def _date(item: ET.Element) -> str | None:
     return None
 
 
+PYEONG_M2 = 3.305785  # 1평 = 3.305785 m^2 (= 400/121)
+
+
+def _per_pyeong(amount_manwon: float | None, area_m2: float | None):
+    """전용면적 기준 (평수, 평당가 만원/평) 계산. 면적/금액 없으면 (None, None).
+
+    주의: API는 전용면적만 제공하므로 '전용 평당가'다. 시장에서 흔히 쓰는
+    공급면적 기준 평당가보다 높게 나온다(공급면적 > 전용면적).
+    """
+    if not area_m2 or amount_manwon is None:
+        return None, None
+    pyeong = area_m2 / PYEONG_M2
+    if pyeong == 0:
+        return None, None
+    return round(pyeong, 2), round(amount_manwon / pyeong, 1)
+
+
 def _check_header(root: ET.Element) -> None:
     # 정상 봉투: <response><header><resultCode>000</resultCode>...
     code = root.findtext(".//header/resultCode")
@@ -79,10 +96,15 @@ def _check_header(root: ET.Element) -> None:
 
 
 def _trade_item(it: ET.Element) -> dict:
+    amount = to_float((_t(it, "dealAmount") or "").replace(",", ""))  # 만원
+    area = to_float(_t(it, "excluUseAr"))  # 전용면적 m^2
+    pyeong, price_per_pyeong = _per_pyeong(amount, area)
     return {
         "apt": _t(it, "aptNm"),
-        "deal_amount": to_float((_t(it, "dealAmount") or "").replace(",", "")),  # 만원
-        "area": to_float(_t(it, "excluUseAr")),  # 전용면적 m^2
+        "deal_amount": amount,
+        "area": area,
+        "pyeong": pyeong,                      # 전용 평수
+        "price_per_pyeong": price_per_pyeong,  # 전용 평당가(만원/평)
         "floor": _int(_t(it, "floor")),
         "build_year": _int(_t(it, "buildYear")),
         "dong": _t(it, "umdNm"),
@@ -92,11 +114,17 @@ def _trade_item(it: ET.Element) -> dict:
 
 
 def _rent_item(it: ET.Element) -> dict:
+    deposit = to_float((_t(it, "deposit") or "").replace(",", ""))           # 보증금 만원
+    monthly = to_float((_t(it, "monthlyRent") or "").replace(",", ""))       # 월세 만원
+    area = to_float(_t(it, "excluUseAr"))
+    pyeong, deposit_per_pyeong = _per_pyeong(deposit, area)  # 보증금 기준(전세 비교용)
     return {
         "apt": _t(it, "aptNm"),
-        "deposit": to_float((_t(it, "deposit") or "").replace(",", "")),       # 보증금 만원
-        "monthly_rent": to_float((_t(it, "monthlyRent") or "").replace(",", "")),  # 월세 만원
-        "area": to_float(_t(it, "excluUseAr")),
+        "deposit": deposit,
+        "monthly_rent": monthly,
+        "area": area,
+        "pyeong": pyeong,                          # 전용 평수
+        "deposit_per_pyeong": deposit_per_pyeong,  # 전용 보증금 평당가(만원/평, 월세는 보증금만 반영)
         "floor": _int(_t(it, "floor")),
         "build_year": _int(_t(it, "buildYear")),
         "dong": _t(it, "umdNm"),

@@ -169,7 +169,9 @@ async def get_apt_trade(region: str, deal_ym: str, rows: int = 50) -> dict:
             모호하면(예: '중구') 시도를 함께 지정('서울 중구').
     deal_ym: 계약 년월. 'YYYYMM'/'YYYY-MM' 모두 허용(예: '202406', '2024-06').
     반환: {name, region_code, deal_ym, count, items:[{apt, deal_amount(만원),
-          area, floor, build_year, dong, jibun, date}], source}.
+          area(전용㎡), pyeong(전용 평수), price_per_pyeong(전용 평당가 만원/평),
+          floor, build_year, dong, jibun, date}], source}.
+    평당가는 전용면적 기준(공급면적 기준 시장 평당가보다 높게 나옴).
     """
     try:
         code = resolve_region(region)
@@ -192,7 +194,8 @@ async def get_apt_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
     region: 지역명 또는 5자리 코드(자동 변환, get_apt_trade와 동일).
     deal_ym: 'YYYYMM'/'YYYY-MM'.
     반환 items: {apt, deposit(보증금 만원), monthly_rent(월세 만원, 0이면 전세),
-                area, floor, build_year, dong, jibun, date}.
+                area(전용㎡), pyeong(전용 평수), deposit_per_pyeong(전용 보증금 평당가
+                만원/평; 월세는 보증금만 반영), floor, build_year, dong, jibun, date}.
     """
     try:
         code = resolve_region(region)

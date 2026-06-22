@@ -142,6 +142,19 @@ async def test_apt_trade_ok(monkeypatch):
     assert first["area"] == pytest.approx(84.97)
     assert first["floor"] == 10
     assert first["date"] == "2024-06-15"
+    # 전용 평당가 = 250000 / (84.97/3.305785)
+    expected_pyeong = 84.97 / 3.305785
+    assert first["pyeong"] == pytest.approx(expected_pyeong, rel=1e-3)
+    assert first["price_per_pyeong"] == pytest.approx(250000 / expected_pyeong, rel=1e-3)
+
+
+def test_per_pyeong():
+    from sources.molit import _per_pyeong
+    pyeong, ppp = _per_pyeong(250000, 84.97)
+    assert pyeong == pytest.approx(25.70, abs=0.05)
+    assert ppp == pytest.approx(9726.7, rel=1e-3)
+    assert _per_pyeong(250000, 0) == (None, None)      # 면적 0
+    assert _per_pyeong(None, 84.97) == (None, None)    # 금액 없음
 
 
 @respx.mock
