@@ -11,8 +11,12 @@
 인증키는 data.go.kr 활용신청 후 발급되는 **Decoding(일반) 키**를 MOLIT_API_KEY 환경변수로
 주입한다(httpx가 자동 URL 인코딩하므로 Encoding 키를 쓰면 이중 인코딩으로 깨진다).
 
-주의: 응답 element명은 공식 문서 기준이며, 실 인증키로 1회 실호출해 검증 후 확정할 것
-(필드명이 다르면 _item()의 태그를 맞춰 수정). 단일 소스이므로 실패 시 상위에서 fallback.
+검증(2026-06-22): 전월세(apt_rent) element명을 실데이터로 확인함
+(aptNm/deposit/monthlyRent/excluUseAr/floor/buildYear/umdNm/jibun/dealYear·Month·Day).
+매매(apt_trade)는 동일 스키마 체계이나 키 구독 권한 문제로 미검증(403). API별 활용신청 필요.
+
+참고: data.go.kr WAF가 curl 기본 User-Agent를 차단하므로 core.http의 브라우저 UA
+클라이언트로 호출해야 한다. 단일 소스이므로 실패 시 상위에서 fallback.
 """
 from __future__ import annotations
 

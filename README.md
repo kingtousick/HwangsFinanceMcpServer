@@ -87,8 +87,10 @@ py -m venv .venv
    전체 목록은 행정표준코드관리시스템(code.go.kr)의 법정동코드 참고.
 4. `deal_amount`/`deposit`/`monthly_rent` 단위는 **만원**. 예: `deal_amount=250000` → 25억.
 
-> 응답은 XML이며 stdlib로 파싱한다. 인증키 발급 후 1회 실호출로 element명을 검증할 것
-> (공공데이터포털 개편 시 필드명이 바뀔 수 있음).
+> **API별 활용신청 필요**: 매매(`get_apt_trade`)와 전월세(`get_apt_rent`)는 별개 API다.
+> 둘 다 쓰려면 data.go.kr에서 각각 활용신청해야 한다(한쪽만 신청 시 다른 쪽은 403).
+> data.go.kr WAF가 curl 기본 UA를 차단하므로 서버는 브라우저 UA로 호출한다(코드 내 처리됨).
+> 응답 XML은 stdlib로 파싱하며 전월세 필드는 실데이터로 검증됨(2026-06-22).
 
 ## 비기능
 - 메모리 TTL 캐시 30초(동일 키 중복 호출 방지)

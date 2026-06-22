@@ -7,9 +7,18 @@
 """
 from __future__ import annotations
 
+import re
+
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
+
+# 에러 메시지에 섞여 나오는 API 키(serviceKey/authkey)를 마스킹
+_SECRET_RE = re.compile(r"(serviceKey|authkey)=[^&\s'\"]+", re.IGNORECASE)
+
+
+def _scrub(s: str) -> str:
+    return _SECRET_RE.sub(r"\1=***", s)
 
 
 def to_float(v) -> float | None:
@@ -67,5 +76,8 @@ def ok(
 
 
 def fail(name: str, err, source: str = "fallback") -> dict:
-    """실패 응답. Claude가 WebSearch로 폴백하도록 error 필드를 채운다."""
-    return {"name": name, "error": str(err), "source": source}
+    """실패 응답. Claude가 WebSearch로 폴백하도록 error 필드를 채운다.
+
+    error 문자열에 섞인 API 키(serviceKey/authkey)는 마스킹한다.
+    """
+    return {"name": name, "error": _scrub(str(err)), "source": source}

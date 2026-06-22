@@ -172,6 +172,15 @@ async def test_apt_trade_no_key_returns_fallback(monkeypatch):
     assert res["source"] == "fallback"
 
 
+def test_fail_scrubs_api_key():
+    """error 메시지의 serviceKey/authkey는 마스킹된다."""
+    from core.schema import fail
+    leaked = "403 for url ...?serviceKey=SECRET123&LAWD_CD=11680"
+    res = fail("매매", leaked)
+    assert "SECRET123" not in res["error"]
+    assert "serviceKey=***" in res["error"]
+
+
 def test_resolve_region():
     from sources.region_codes import resolve_region
     assert resolve_region("11680") == "11680"
