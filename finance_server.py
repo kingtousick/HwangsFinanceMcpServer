@@ -237,16 +237,19 @@ async def get_apt_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
 
 
 @mcp.tool()
-async def get_jeonse_ratio(region: str, deal_ym: str, rows: int = 1000) -> dict:
+async def get_jeonse_ratio(region: str, deal_ym: str, months: int = 1,
+                           rows: int = 1000) -> dict:
     """단지별 전세가율 집계(전세가율 = 전세 보증금 평당가 ÷ 매매 평당가 × 100).
     MOLIT_API_KEY 필요(매매·전월세 API 둘 다 활용신청 필요).
 
-    region: 지역명 또는 5자리 코드. deal_ym: 'YYYYMM'/'YYYY-MM'.
-    해당 월에 매매·전세(월세 제외)가 모두 있는 단지만 산출, 전세가율 내림차순.
-    반환: {name, region_code, deal_ym, matched_complex_count, avg_jeonse_ratio,
-          items:[{apt, dong, jeonse_ratio(%), sale_price_per_pyeong,
-                  jeonse_deposit_per_pyeong, jeonse_count}], source}.
-    주의: 단일 월 기준이라 매매·전세가 같은 달에 모두 발생한 단지만 매칭됨(표본 적을 수 있음).
+    region: 지역명 또는 5자리 코드. deal_ym: 기준월 'YYYYMM'/'YYYY-MM'.
+    months: 매칭 표본을 늘리려면 기준월 포함 직전 N개월을 합산(기본 1, 최대 12).
+            단일 월은 매매·전세가 같은 달에 모두 난 단지만 매칭돼 표본이 적으므로
+            months=3~6을 쓰면 매칭 단지가 늘어난다.
+    매매·전세(월세 제외)가 모두 있는 단지만 산출, 전세가율 내림차순.
+    반환: {name, region_code, deal_ym, months, period, matched_complex_count,
+          avg_jeonse_ratio, items:[{apt, dong, jeonse_ratio(%), sale_price_per_pyeong,
+          jeonse_deposit_per_pyeong, jeonse_count}], source}.
     """
     try:
         code = resolve_region(region)
@@ -256,10 +259,10 @@ async def get_jeonse_ratio(region: str, deal_ym: str, rows: int = 1000) -> dict:
 
     async def fetch():
         return await _cascade(
-            f"전세가율:{code}:{ym}",
-            lambda: molit.jeonse_ratio_summary(code, ym, rows),
+            f"전세가율:{code}:{ym}:{months}",
+            lambda: molit.jeonse_ratio_summary(code, ym, rows, months),
         )
-    return await cached(f"jeonse_ratio:{code}:{ym}:{rows}", fetch)
+    return await cached(f"jeonse_ratio:{code}:{ym}:{months}:{rows}", fetch)
 
 
 # ---------------------------------------------------------------- 스냅샷

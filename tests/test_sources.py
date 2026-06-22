@@ -223,6 +223,26 @@ async def test_get_jeonse_ratio_e2e(monkeypatch):
     assert res["items"][0]["jeonse_ratio"] == pytest.approx(60.0, abs=0.2)
 
 
+def test_months_back():
+    from sources.molit import _months_back
+    assert _months_back("202604", 1) == ["202604"]
+    assert _months_back("202602", 3) == ["202602", "202601", "202512"]  # 연도 경계
+    assert _months_back("202604", 0) == ["202604"]                       # 최소 1
+
+
+@respx.mock
+async def test_get_jeonse_ratio_multi_month(monkeypatch):
+    """months=3이면 같은 단지가 여러 달에서 합산돼도 단지수는 1로 집계."""
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    respx.get(MOLIT_TRADE).mock(return_value=httpx.Response(200, text=_MOLIT_XML))
+    respx.get(MOLIT_RENT).mock(return_value=httpx.Response(200, text=_MOLIT_RENT_XML))
+    res = await srv.get_jeonse_ratio("강남구", "2026-04", months=3)
+    assert res["months"] == 3
+    assert res["period"] == "202602~202604"
+    assert res["matched_complex_count"] == 1        # 래미안 단지 1개로 묶임
+    assert res["items"][0]["jeonse_count"] == 3     # 3개월 × 전세 1건
+
+
 def test_per_pyeong():
     from sources.molit import _per_pyeong
     pyeong, ppp = _per_pyeong(250000, 84.97)

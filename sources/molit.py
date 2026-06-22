@@ -251,18 +251,52 @@ def jeonse_ratio(trade_items: list[dict], rent_items: list[dict]) -> list[dict]:
     return out
 
 
-async def jeonse_ratio_summary(region_code: str, deal_ym: str, rows: int = 1000) -> dict:
-    """단지별 전세가율 집계. 매매·전월세 API를 병렬 호출해 매칭."""
-    trade, rent = await asyncio.gather(
-        apt_trade(region_code, deal_ym, rows),
-        apt_rent(region_code, deal_ym, rows),
-    )
-    items = jeonse_ratio(trade["items"], rent["items"])
+def _months_back(deal_ym: str, n: int) -> list[str]:
+    """deal_ym(YYYYMM) 포함 직전 n개월의 YYYYMM 리스트(최신순)."""
+    y, m = int(deal_ym[:4]), int(deal_ym[4:6])
+    out = []
+    for _ in range(max(1, n)):
+        out.append(f"{y:04d}{m:02d}")
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    return out
+
+
+async def jeonse_ratio_summary(region_code: str, deal_ym: str, rows: int = 1000,
+                               months: int = 1) -> dict:
+    """단지별 전세가율 집계. months>1이면 직전 N개월 거래를 합산해 매칭 표본을 늘린다.
+
+    매매·전월세 API를 모든 대상 월에 대해 병렬 호출. 일부 월 실패는 건너뛰고
+    가능한 데이터로 집계하되, 전부 실패하면 예외를 올려 상위에서 fallback.
+    """
+    months = max(1, min(12, months))
+    yms = _months_back(deal_ym, months)
+
+    tasks = []
+    for ym in yms:
+        tasks.append(apt_trade(region_code, ym, rows))
+        tasks.append(apt_rent(region_code, ym, rows))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    trade_items: list[dict] = []
+    rent_items: list[dict] = []
+    errors: list[Exception] = []
+    for i in range(len(yms)):
+        t, r = results[2 * i], results[2 * i + 1]
+        (errors.append(t) if isinstance(t, Exception) else trade_items.extend(t["items"]))
+        (errors.append(r) if isinstance(r, Exception) else rent_items.extend(r["items"]))
+    if not trade_items and not rent_items:
+        raise errors[0] if errors else RuntimeError("no data")
+
+    items = jeonse_ratio(trade_items, rent_items)
     avg = round(sum(x["jeonse_ratio"] for x in items) / len(items), 1) if items else None
     return {
         "name": "아파트 전세가율",
         "region_code": region_code,
         "deal_ym": deal_ym,
+        "months": months,
+        "period": f"{yms[-1]}~{yms[0]}" if months > 1 else deal_ym,
         "matched_complex_count": len(items),
         "avg_jeonse_ratio": avg,
         "items": items,
