@@ -162,6 +162,51 @@ async def apt_trade(region_code: str, deal_ym: str, rows: int = 50) -> dict:
                         rows, _trade_item)
 
 
+def summarize_trades(items: list[dict]) -> list[dict]:
+    """매매 거래 목록을 (법정동, 단지)별로 묶어 평균 평당가 등을 집계.
+
+    price_per_pyeong이 없는 항목은 제외. 평균 평당가 내림차순 정렬.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for it in items:
+        if it.get("price_per_pyeong") is None:
+            continue
+        groups.setdefault((it.get("dong"), it.get("apt")), []).append(it)
+
+    out: list[dict] = []
+    for (dong, apt), rows in groups.items():
+        ppps = [r["price_per_pyeong"] for r in rows]
+        amounts = [r["deal_amount"] for r in rows if r.get("deal_amount") is not None]
+        pyeongs = [r["pyeong"] for r in rows if r.get("pyeong") is not None]
+        out.append({
+            "apt": apt,
+            "dong": dong,
+            "count": len(rows),
+            "avg_price_per_pyeong": round(sum(ppps) / len(ppps), 1),
+            "min_price_per_pyeong": round(min(ppps), 1),
+            "max_price_per_pyeong": round(max(ppps), 1),
+            "avg_deal_amount": round(sum(amounts) / len(amounts), 1) if amounts else None,
+            "avg_pyeong": round(sum(pyeongs) / len(pyeongs), 2) if pyeongs else None,
+        })
+    out.sort(key=lambda x: x["avg_price_per_pyeong"], reverse=True)
+    return out
+
+
+async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000) -> dict:
+    """단지별 평균 평당가 집계. 의미있는 평균을 위해 기본 rows=1000(해당 월 전량)."""
+    base = await apt_trade(region_code, deal_ym, rows)
+    summary = summarize_trades(base["items"])
+    return {
+        "name": "아파트매매 단지별 평균평당가",
+        "region_code": region_code,
+        "deal_ym": deal_ym,
+        "complex_count": len(summary),
+        "deal_count": base["count"],
+        "items": summary,
+        "source": "molit",
+    }
+
+
 async def apt_rent(region_code: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 전월세 실거래가. 보증금/월세(만원). 월세 0이면 전세."""
     return await _fetch(_RENT_URL, "아파트전월세실거래", region_code, deal_ym,

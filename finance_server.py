@@ -188,6 +188,31 @@ async def get_apt_trade(region: str, deal_ym: str, rows: int = 50) -> dict:
 
 
 @mcp.tool()
+async def get_apt_trade_summary(region: str, deal_ym: str, rows: int = 1000) -> dict:
+    """아파트 매매 실거래가를 단지별 평균 평당가로 집계. MOLIT_API_KEY 필요.
+
+    region: 지역명 또는 5자리 코드(get_apt_trade와 동일). deal_ym: 'YYYYMM'/'YYYY-MM'.
+    해당 월 거래를 (법정동, 단지)별로 묶어 평균 평당가 내림차순으로 반환.
+    반환: {name, region_code, deal_ym, complex_count, deal_count,
+          items:[{apt, dong, count, avg_price_per_pyeong, min_price_per_pyeong,
+                  max_price_per_pyeong, avg_deal_amount, avg_pyeong}], source}.
+    평당가는 전용면적 기준.
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"단지별평당가:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
+    async def fetch():
+        return await _cascade(
+            f"단지별평당가:{code}:{ym}",
+            lambda: molit.apt_trade_summary(code, ym, rows),
+        )
+    return await cached(f"apt_trade_summary:{code}:{ym}:{rows}", fetch)
+
+
+@mcp.tool()
 async def get_apt_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 전월세 실거래가(국토교통부 공공데이터포털). MOLIT_API_KEY 필요.
 

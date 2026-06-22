@@ -148,6 +148,36 @@ async def test_apt_trade_ok(monkeypatch):
     assert first["price_per_pyeong"] == pytest.approx(250000 / expected_pyeong, rel=1e-3)
 
 
+def test_summarize_trades():
+    from sources.molit import summarize_trades
+    items = [
+        {"apt": "A", "dong": "역삼동", "price_per_pyeong": 1000, "deal_amount": 50000, "pyeong": 50},
+        {"apt": "A", "dong": "역삼동", "price_per_pyeong": 2000, "deal_amount": 60000, "pyeong": 30},
+        {"apt": "B", "dong": "개포동", "price_per_pyeong": 3000, "deal_amount": 90000, "pyeong": 30},
+        {"apt": "C", "dong": "x", "price_per_pyeong": None, "deal_amount": 1, "pyeong": 1},  # 제외
+    ]
+    out = summarize_trades(items)
+    assert len(out) == 2                       # C 제외(평당가 없음)
+    assert out[0]["apt"] == "B"                # 평균 평당가 내림차순
+    assert out[1]["apt"] == "A"
+    assert out[1]["count"] == 2
+    assert out[1]["avg_price_per_pyeong"] == 1500.0
+    assert out[1]["min_price_per_pyeong"] == 1000.0
+    assert out[1]["max_price_per_pyeong"] == 2000.0
+    assert out[1]["avg_deal_amount"] == 55000.0
+
+
+@respx.mock
+async def test_apt_trade_summary_groups(monkeypatch):
+    monkeypatch.setenv("MOLIT_API_KEY", "dummy-key")
+    respx.get(MOLIT_TRADE).mock(return_value=httpx.Response(200, text=_MOLIT_XML))
+    res = await srv.get_apt_trade_summary("강남구", "2024-06")
+    assert res["source"] == "molit"
+    assert res["deal_count"] == 2
+    assert res["complex_count"] == 2           # 래미안, 개포자이
+    assert all("avg_price_per_pyeong" in c for c in res["items"])
+
+
 def test_per_pyeong():
     from sources.molit import _per_pyeong
     pyeong, ppp = _per_pyeong(250000, 84.97)
