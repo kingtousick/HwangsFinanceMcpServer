@@ -320,6 +320,153 @@ def test_resolve_region():
         resolve_region("없는동네구")     # 미수록
 
 
+# ------------------------------------------------ 공사현황(철도/광역교통)
+
+
+def test_resolve_line():
+    from sources.rail_lines import resolve_line
+    a = resolve_line("GTX-A")
+    assert a["preset"] is True
+    assert a["line"] == "GTX-A"
+    assert "GTX-A" in a["keywords"] and "수도권광역급행철도 A" in a["keywords"]
+    assert resolve_line("gtx a")["line"] == "GTX-A"          # 공백/대소문자 무시
+    assert resolve_line("삼성동탄")["line"] == "GTX-A"       # 키워드로도 매칭
+    free = resolve_line("어떤신설노선")                      # 미수록 → passthrough
+    assert free["preset"] is False
+    assert free["keywords"] == ["어떤신설노선"]
+
+
+_G2B_JSON = {"response": {"header": {"resultCode": "00", "resultMsg": "정상"},
+    "body": {"pageNo": 1, "numOfRows": 10, "totalCount": 1, "items": [
+        {"bidNtceNo": "20260601234", "bidNtceOrd": "00",
+         "bidNtceNm": "수도권광역급행철도 A노선 OO공구 건설공사",
+         "ntceInsttNm": "국가철도공단", "dminsttNm": "국토교통부",
+         "bidNtceDt": "2026-06-20 10:00:00", "opengDt": "2026-07-01 11:00:00",
+         "presmptPrce": "120000000000", "asignBdgtAmt": "150000000000",
+         "bidNtceUrl": "https://www.g2b.go.kr/x"}]}}}
+
+
+@respx.mock
+async def test_construction_bids_ok(monkeypatch):
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    route = respx.get(url__startswith="https://apis.data.go.kr/1230000").mock(
+        return_value=httpx.Response(200, json=_G2B_JSON))
+    res = await srv.get_construction_bids("GTX-A")
+    assert res["source"] == "g2b"
+    assert res["count"] == 1
+    b = res["bids"][0]
+    assert b["공고번호"] == "20260601234"
+    assert b["추정가격"] == 120000000000.0
+    assert b["발주기관"] == "국가철도공단"
+    # 프리셋이면 여러 키워드로 검색하므로 호출이 1회 이상
+    assert route.call_count >= 1
+    assert route.calls[0].request.url.params["bidNtceNm"]  # 공고명 키워드 전달
+
+
+async def test_construction_bids_no_key_returns_fallback(monkeypatch):
+    monkeypatch.delenv("DATA_GO_KR_API_KEY", raising=False)
+    monkeypatch.delenv("MOLIT_API_KEY", raising=False)
+    res = await srv.get_construction_bids("GTX-A")
+    assert "error" in res
+    assert res["source"] == "fallback"
+
+
+_FISCAL_JSON = {"ExpenseBudgetTimeSeries": [
+    {"head": [{"list_total_count": 1}, {"RESULT": {"CODE": "INFO-000", "MESSAGE": "정상"}}]},
+    {"row": [{"OFFC_NM": "신안산선 복선전철", "FY": "2026",
+              "Y_PRES_DRYR_BD_AMT": "500000", "EXE_AMT": "120000", "DEPT_NM": "국토교통부"}]}]}
+
+
+@respx.mock
+async def test_project_budget_ok(monkeypatch):
+    monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
+        return_value=httpx.Response(200, json=_FISCAL_JSON))
+    res = await srv.get_project_budget("신안산선")
+    assert res["source"] == "openfiscaldata"
+    assert res["count"] == 1
+    p = res["projects"][0]
+    assert p["사업명"] == "신안산선 복선전철"
+    assert p["연도"] == "2026"
+    assert p["예산액"] == 500000.0
+    assert p["집행액"] == 120000.0
+
+
+@respx.mock
+async def test_project_budget_year_filter(monkeypatch):
+    monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
+        return_value=httpx.Response(200, json=_FISCAL_JSON))
+    res = await srv.get_project_budget("신안산선", year=2025)  # 2026만 있으므로 0건
+    assert res["count"] == 0
+
+
+async def test_project_budget_no_key_returns_fallback(monkeypatch):
+    monkeypatch.delenv("OPEN_FISCAL_API_KEY", raising=False)
+    res = await srv.get_project_budget("신안산선")
+    assert "error" in res
+    assert res["source"] == "fallback"
+
+
+_NOTICE_JSON = {"records": [
+    {"고시명": "7호선 청라연장 기본계획 변경고시", "고시번호": "2026-100",
+     "고시일": "2026-05-10", "사업명": "도시철도 7호선 청라국제도시 연장", "고시구분": "기본계획"},
+    {"고시명": "관련없는 노선 고시", "고시번호": "2026-101",
+     "고시일": "2026-05-11", "사업명": "다른 사업", "고시구분": "실시계획"}]}
+
+
+@respx.mock
+async def test_rail_notices_filter(monkeypatch):
+    monkeypatch.setenv("KRNA_NOTICE_URL_BASIC", "https://example.gov/notice.json")
+    respx.get("https://example.gov/notice.json").mock(
+        return_value=httpx.Response(200, json=_NOTICE_JSON))
+    res = await srv.get_rail_notices("7호선 청라연장")
+    assert res["source"] == "krna_notice"
+    assert res["total_records"] == 2
+    assert res["count"] == 1                       # 청라 키워드 매칭 1건만
+    assert res["notices"][0]["고시번호"] == "2026-100"
+
+
+async def test_rail_notices_no_url_returns_fallback(monkeypatch):
+    monkeypatch.delenv("KRNA_NOTICE_URL_BASIC", raising=False)
+    res = await srv.get_rail_notices("GTX-A")
+    assert "error" in res
+    assert res["source"] == "fallback"
+
+
+def test_kr_progress_extract():
+    from sources.kr_progress import _extract
+    text = ("기타 내용 ... 수도권광역급행철도 A노선 건설사업 '26.3월 기준 공정률 19.4% 이며 "
+            "일반철도 어쩌고 공정률 3.9%")
+    out = _extract(text, ["수도권광역급행철도 A", "GTX-A"])
+    assert len(out) == 1
+    assert out[0]["공정률_pct"] == 19.4
+    assert out[0]["기준월"] == "2026-03"
+
+
+def test_fail_scrubs_fiscal_key():
+    """열린재정 Key= 파라미터도 마스킹된다(보강된 _SECRET_RE)."""
+    from core.schema import fail
+    res = fail("재정", "401 ...?Key=FISCALSECRET&Type=json")
+    assert "FISCALSECRET" not in res["error"]
+    assert "Key=***" in res["error"]
+
+
+@respx.mock
+async def test_rail_project_status_partial(monkeypatch):
+    """통합 스냅샷: 일부 소스만 설정돼도 나머지는 error로 표기하고 반환(크래시 없음)."""
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    monkeypatch.delenv("OPEN_FISCAL_API_KEY", raising=False)
+    monkeypatch.delenv("KRNA_NOTICE_URL_BASIC", raising=False)
+    respx.get(url__startswith="https://apis.data.go.kr/1230000").mock(
+        return_value=httpx.Response(200, json=_G2B_JSON))
+    res = await srv.get_rail_project_status("GTX-A")
+    assert res["line"] == "GTX-A"
+    assert res["bids"]["source"] == "g2b"          # 발주는 정상
+    assert "error" in res["budget"]                # 예산은 키 없어 error
+    assert "error" in res["notices"]               # 고시는 URL 없어 error
+
+
 @respx.mock
 async def test_snapshot_returns_eight():
     respx.get(NAVER_KOSPI).mock(return_value=httpx.Response(200, json=_naver_payload()))

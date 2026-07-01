@@ -13,8 +13,12 @@ from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
 
-# 에러 메시지에 섞여 나오는 API 키(serviceKey/authkey)를 마스킹
-_SECRET_RE = re.compile(r"(serviceKey|authkey)=[^&\s'\"]+", re.IGNORECASE)
+# 에러 메시지에 섞여 나오는 API 키를 마스킹.
+# data.go.kr(serviceKey), 수출입은행(authkey), 열린재정(Key/apiKey) 등 파라미터명 변형 포괄.
+_SECRET_RE = re.compile(
+    r"(serviceKey|service_key|authkey|auth_key|apiKey|api_key|Key)=[^&\s'\"]+",
+    re.IGNORECASE,
+)
 
 
 def _scrub(s: str) -> str:

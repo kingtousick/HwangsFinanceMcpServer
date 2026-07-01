@@ -22,8 +22,10 @@ from mcp.server.fastmcp import FastMCP
 
 from core.cache import cached
 from core.schema import fail
-from sources import naver, yahoo, coingecko, upbit, exim, playwright_fb, molit
+from sources import (naver, yahoo, coingecko, upbit, exim, playwright_fb, molit,
+                     g2b, fiscal, kr_notice, kr_progress)
 from sources.region_codes import resolve_region
+from sources.rail_lines import resolve_line
 
 load_dotenv()
 
@@ -266,6 +268,123 @@ async def get_jeonse_ratio(region: str, deal_ym: str, months: int = 1,
             lambda: molit.jeonse_ratio_summary(code, ym, rows, months),
         )
     return await cached(f"jeonse_ratio:{code}:{ym}:{months}:{rows}", fetch)
+
+
+# ------------------------------------------------ 공사현황(철도/광역교통)
+
+# 변화가 느린 데이터라 TTL을 길게: 입찰 30분, 고시/공정률 6시간, 예산 1일.
+_TTL_BIDS = 1800.0
+_TTL_NOTICE = 21600.0
+_TTL_PROGRESS = 21600.0
+_TTL_BUDGET = 86400.0
+
+
+@mcp.tool()
+async def get_construction_bids(query: str, biz: str = "공사", days: int = 30,
+                                rows: int = 50) -> dict:
+    """철도/광역교통 발주·착공 신호 — 조달청 나라장터 입찰공고.
+    DATA_GO_KR_API_KEY(또는 MOLIT_API_KEY) 필요 + '나라장터 입찰공고정보서비스' 활용신청.
+
+    query: 노선 프리셋 별칭('GTX-A', '신안산선', '7호선 청라연장' 등) 또는 자유 키워드
+           (공고명 부분일치). 프리셋이면 여러 표기를 함께 검색해 누락을 줄인다.
+    biz: '공사'(기본)/'용역'(설계·감리)/'물품'. days: 직전 N일(기본 30). rows: 키워드당 건수.
+    반환: {name, biz, keywords, period, count, bids:[{공고명, 공고번호, 차수, 공고일,
+          입찰마감, 개찰일, 추정가격(원), 배정예산(원), 발주기관, 수요기관, 지역제한, url}],
+          source}. 입찰공고가 뜨면 착공이 임박했다는 1차 신호.
+    """
+    line = resolve_line(query)
+
+    async def fetch():
+        return await _cascade(
+            f"입찰공고:{line['line']}",
+            lambda: g2b.search_bids(line["keywords"], biz, days, rows),
+        )
+    return await cached(f"bids:{line['line']}:{biz}:{days}:{rows}", fetch, _TTL_BIDS)
+
+
+@mcp.tool()
+async def get_project_budget(query: str, year: int | None = None,
+                             rows: int = 100) -> dict:
+    """철도/광역교통 예타·재정 신호 — 열린재정 재정사업 예산·집행 시계열.
+    OPEN_FISCAL_API_KEY 필요(openfiscaldata.go.kr 발급).
+
+    query: 노선 프리셋 별칭 또는 사업명 키워드. year: 특정 회계연도 필터(미지정 시 전체).
+    반환: {name, keywords, year, count, projects:[{사업명, 연도, 예산액, 집행액, 부처}],
+          source}. 예산이 잡히고 집행이 늘면 '진짜 돈이 가는' 신호.
+    주의: 열린재정 API명/검색 파라미터는 환경변수(OPEN_FISCAL_API_NAME/OPEN_FISCAL_KW_PARAM)로
+          실제 값에 맞춰야 한다(sources/fiscal.py 참고).
+    """
+    line = resolve_line(query)
+
+    async def fetch():
+        return await _cascade(
+            f"재정사업:{line['line']}",
+            lambda: fiscal.search_budget(line["keywords"], year, rows),
+        )
+    return await cached(f"budget:{line['line']}:{year}:{rows}", fetch, _TTL_BUDGET)
+
+
+@mcp.tool()
+async def get_rail_notices(query: str, kind: str = "기본") -> dict:
+    """철도 고시·인허가 신호 — 국가철도공단 관보고시(공공데이터포털 파일데이터).
+    파일 다운로드 URL 환경변수 필요(KRNA_NOTICE_URL_BASIC 등, sources/kr_notice.py 참고).
+
+    query: 노선 프리셋 별칭 또는 사업명 키워드. kind: '기본'(관보고시 기본정보)/
+           '계획'(기본계획 고시)/'세목'(관보고시 세목정보).
+    반환: {name, kind, keywords, total_records, count, notices:[{고시명, 고시번호,
+          고시일, 사업명, 종류}], source}. 기본계획/실시계획 고시는 법적 확정 신호.
+    """
+    line = resolve_line(query)
+
+    async def fetch():
+        return await _cascade(
+            f"관보고시:{line['line']}",
+            lambda: kr_notice.search_notices(line["keywords"], kind),
+        )
+    return await cached(f"notice:{line['line']}:{kind}", fetch, _TTL_NOTICE)
+
+
+@mcp.tool()
+async def get_rail_progress(query: str) -> dict:
+    """철도 진행현황·공정률 — 국가철도공단 주요사업현황(HTML 스크래핑, Playwright 필요).
+
+    query: 노선 프리셋 별칭 또는 사업명 키워드. 프리셋이면 광역/일반 구분 페이지를 좁혀
+           조회한다. 공식 API가 없어 HTML을 렌더링·정규식 추출하므로 **불안정**하다
+           (페이지 구조 변경/Playwright 미설치 시 error 반환).
+    반환: {name, keywords, count, progress:[{사업명(컨텍스트 추정), 공정률_pct, 기준월}],
+          source, note}.
+    """
+    line = resolve_line(query)
+
+    async def fetch():
+        return await _cascade(
+            f"공정률:{line['line']}",
+            lambda: kr_progress.get_progress(line["keywords"], line.get("kric_m")),
+        )
+    return await cached(f"progress:{line['line']}", fetch, _TTL_PROGRESS)
+
+
+@mcp.tool()
+async def get_rail_project_status(query: str) -> dict:
+    """한 노선/사업의 공사현황 통합 스냅샷 — 예산·발주·고시·공정률을 병렬 조회.
+
+    query: 노선 프리셋 별칭('GTX-A' 등) 또는 사업명 키워드.
+    예산(열린재정)·발주(나라장터)·고시(관보고시)·공정률(국가철도공단)을 한 번에 모은다.
+    개별 소스 실패는 해당 섹션 error로만 표기하고 나머지는 정상 반환한다(부분 성공 허용).
+    반환: {query, line, preset, budget, bids, notices, progress}.
+    """
+    line = resolve_line(query)
+    tasks = {
+        "budget": get_project_budget(query),
+        "bids": get_construction_bids(query),
+        "notices": get_rail_notices(query),
+        "progress": get_rail_progress(query),
+    }
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    out: dict = {"query": query, "line": line["line"], "preset": line["preset"]}
+    for key, res in zip(tasks.keys(), results):
+        out[key] = fail(key, res) if isinstance(res, Exception) else res
+    return out
 
 
 # ---------------------------------------------------------------- 스냅샷
