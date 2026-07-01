@@ -62,14 +62,20 @@ async def aclose() -> None:
 
 
 async def get_json(url: str, *, params: dict | None = None,
-                   headers: dict | None = None, retries: int = 1) -> dict | list:
-    """GET 후 JSON 파싱. retries회 재시도. 최종 실패 시 예외 전파."""
+                   headers: dict | None = None, retries: int = 1,
+                   timeout: float | None = None) -> dict | list:
+    """GET 후 JSON 파싱. retries회 재시도. 최종 실패 시 예외 전파.
+
+    timeout: 이 호출만 별도 타임아웃(초). 대용량 페이지네이션 응답용
+             (미지정 시 클라이언트 기본 5초).
+    """
     client = get_client()
     last_exc: Exception | None = None
+    kw = {} if timeout is None else {"timeout": timeout}
     for attempt in range(retries + 1):
         t0 = time.perf_counter()
         try:
-            r = await client.get(url, params=params, headers=headers)
+            r = await client.get(url, params=params, headers=headers, **kw)
             r.raise_for_status()
             data = r.json()
             logger.info("GET ok url=%s attempt=%d %.0fms",

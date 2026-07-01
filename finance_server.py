@@ -281,25 +281,29 @@ _TTL_BUDGET = 86400.0
 
 @mcp.tool()
 async def get_construction_bids(query: str, biz: str = "공사", days: int = 30,
-                                rows: int = 50) -> dict:
+                                rows: int = 50, agency: str | None = None) -> dict:
     """철도/광역교통 발주·착공 신호 — 조달청 나라장터 입찰공고.
     DATA_GO_KR_API_KEY(또는 MOLIT_API_KEY) 필요 + '나라장터 입찰공고정보서비스' 활용신청.
 
-    query: 노선 프리셋 별칭('GTX-A', '신안산선', '7호선 청라연장' 등) 또는 자유 키워드
-           (공고명 부분일치). 프리셋이면 여러 표기를 함께 검색해 누락을 줄인다.
-    biz: '공사'(기본)/'용역'(설계·감리)/'물품'. days: 직전 N일(기본 30). rows: 키워드당 건수.
-    반환: {name, biz, keywords, period, count, bids:[{공고명, 공고번호, 차수, 공고일,
-          입찰마감, 개찰일, 추정가격(원), 배정예산(원), 발주기관, 수요기관, 지역제한, url}],
-          source}. 입찰공고가 뜨면 착공이 임박했다는 1차 신호.
+    query: 노선 프리셋 별칭('GTX-A', '신안산선', '7호선 청라연장', '9호선 연장' 등) 또는
+           자유 키워드(공고명 부분일치). 프리셋이면 여러 표기를 함께 검색해 누락을 줄인다.
+    biz: '공사'(기본)/'용역'(설계·감리)/'물품'. days: 직전 N일(기본 30). rows: 최대 건수.
+    agency: 발주/수요기관 필터(예: '서울교통공사'). 숫자 노선명('9호선')이 도로 노선번호
+            (국도79호선 등)에 걸리는 노이즈 제거용. 미지정 시 프리셋의 기관 힌트를 쓴다.
+    반환: {name, biz, keywords, agencies, period, count, bids:[{공고명, 공고번호, 차수,
+          공고일, 입찰마감, 개찰일, 추정가격(원), 배정예산(원), 발주기관, 수요기관,
+          지역제한, url}], source}. 입찰공고가 뜨면 착공이 임박했다는 1차 신호.
     """
     line = resolve_line(query)
+    agencies = [agency] if agency else line.get("agencies")
 
     async def fetch():
         return await _cascade(
             f"입찰공고:{line['line']}",
-            lambda: g2b.search_bids(line["keywords"], biz, days, rows),
+            lambda: g2b.search_bids(line["keywords"], biz, days, rows, agencies),
         )
-    return await cached(f"bids:{line['line']}:{biz}:{days}:{rows}", fetch, _TTL_BIDS)
+    key = f"bids:{line['line']}:{biz}:{days}:{rows}:{agency or ''}"
+    return await cached(key, fetch, _TTL_BIDS)
 
 
 @mcp.tool()

@@ -24,10 +24,16 @@ _PAGES = {
     "05010302": "https://www.kr.or.kr/sub/info.do?m=05010302",  # 일반철도
 }
 
-# "공정률 19.4%" / "공정률 : 19.4 %"
-_PCT_RE = re.compile(r"공정률[^0-9%]{0,8}([0-9]{1,3}(?:\.[0-9]+)?)\s*%")
+# "공정률 ('26.3월 기준) 68.67%" — 공정률과 퍼센트 사이에 기준월 숫자('26.3)가 끼므로
+# [^%]로 건너뛰고(비탐욕) 퍼센트 바로 앞 숫자를 잡는다.
+_PCT_RE = re.compile(r"공정률[^%]{0,40}?([0-9]{1,3}(?:\.[0-9]+)?)\s*%")
 # "'26.3월 기준" / "2026.3월 기준" / "'26. 3. 기준"
 _BASE_MONTH_RE = re.compile(r"['’]?(\d{2,4})[.\-]\s*(\d{1,2})\s*월?\s*기준")
+
+
+def _norm(s: str) -> str:
+    """공백/하이픈/물결 제거 + 소문자 — 표기 차이 흡수용 매칭 키."""
+    return re.sub(r"[\s\-~]", "", s or "").lower()
 
 
 async def _get_browser():
@@ -35,60 +41,78 @@ async def _get_browser():
     if _browser is None:
         from playwright.async_api import async_playwright  # 지연 import
         pw = await async_playwright().start()
-        _browser = await pw.chromium.launch(headless=True)
+        # 사내망 TLS 가로채기로 chromium 다운로드가 막히므로(SELF_SIGNED_CERT_IN_CHAIN)
+        # Windows 기본 브라우저(Edge)→Chrome→번들 chromium 순으로 시스템 브라우저 우선.
+        last: Exception | None = None
+        for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
+            try:
+                _browser = await pw.chromium.launch(headless=True, **kwargs)
+                break
+            except Exception as e:  # noqa: BLE001 - 다음 브라우저로 폴백
+                last = e
+        if _browser is None:
+            raise last or RuntimeError("no chromium/edge/chrome available")
     return _browser
 
 
-async def _page_text(url: str) -> str:
+async def _page_items(url: str) -> list[dict]:
+    """주요사업현황 아코디언에서 (사업명, 패널텍스트) 목록 추출.
+
+    각 사업은 <li class="news">로, 제목(토글 링크)과 상세(사업내용·추진현황·공정률)를
+    함께 담는다. inner_text는 펼쳐진 항목만 보여 숨은 패널을 놓치므로 li별 textContent를 쓴다.
+    """
     async with _lock:  # 동시성 1
         browser = await _get_browser()
         page = await browser.new_page()
         try:
-            await page.goto(url, wait_until="networkidle", timeout=15000)
-            return await page.inner_text("body")
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+            return await page.evaluate(
+                """() => [...document.querySelectorAll('li.news')].map(li => {
+                    const a = li.querySelector('a');
+                    return {
+                        title: ((a ? a.innerText : '') || '').replace(/\\s+/g,' ').trim(),
+                        text: (li.textContent || '').replace(/\\s+/g,' ').trim(),
+                    };
+                }).filter(x => x.title)"""
+            )
         finally:
             await page.close()
 
 
-def _nearest_base_month(text: str, pos: int) -> str | None:
-    """pos 주변에서 가장 가까운 '기준월'을 찾는다(앞쪽 우선)."""
-    best, best_d = None, 10 ** 9
-    for m in _BASE_MONTH_RE.finditer(text):
-        d = abs(m.start() - pos)
-        if d < best_d:
-            best_d, best = d, m
-    if not best:
+def _base_month(text: str) -> str | None:
+    m = _BASE_MONTH_RE.search(text)
+    if not m:
         return None
-    yy, mm = best.group(1), int(best.group(2))
+    yy, mm = m.group(1), int(m.group(2))
     year = int(yy) + 2000 if len(yy) == 2 else int(yy)
     return f"{year}-{mm:02d}"
 
 
-def _extract(text: str, keywords: list[str]) -> list[dict]:
-    """공정률 출현 지점마다 앞 컨텍스트를 사업명 후보로, 가까운 기준월을 묶어 추출.
+def _extract(items: list[dict], keywords: list[str]) -> list[dict]:
+    """li별 (사업명, 패널)에서 키워드 매칭 사업의 공정률·기준월 추출.
 
-    컨텍스트는 '직전 공정률 매칭 끝 ~ 이번 매칭 시작'으로 한정해 인접 사업으로 번지는 것을
-    막는다(추가로 최대 120자로 컷). 키워드가 그 컨텍스트에 포함된 항목만 반환.
+    매칭은 공백/표기 차이를 흡수하도록 정규화 후 **제목(사업명)** 부분일치. 패널 본문까지
+    매칭하면 다른 노선을 언급한 설명文에 걸려 오염되므로(GTX-A가 C노선을 잡는 등) 제목만 본다.
     """
+    kn = [_norm(k) for k in keywords if k]
     out: list[dict] = []
     seen: set = set()
-    prev_end = 0
-    for m in _PCT_RE.finditer(text):
-        raw = text[max(prev_end, m.start() - 120):m.start()]
-        prev_end = m.end()
-        ctx = re.sub(r"\s+", " ", raw).strip()
-        if not any(kw in ctx for kw in keywords):
+    for it in items:
+        title = it.get("title") or ""
+        text = it.get("text") or ""
+        if not any(k in _norm(title) for k in kn):
+            continue
+        m = _PCT_RE.search(text)
+        if not m:
             continue
         pct = float(m.group(1))
-        base = _nearest_base_month(text, m.start())
-        key = (ctx[-30:], pct)
-        if key in seen:
+        if title in seen:
             continue
-        seen.add(key)
+        seen.add(title)
         out.append({
-            "사업명": ctx[-40:] or None,   # 앞 컨텍스트(휴리스틱)
+            "사업명": title,
             "공정률_pct": pct,
-            "기준월": base,
+            "기준월": _base_month(text),
         })
     return out
 
@@ -99,11 +123,11 @@ async def get_progress(keywords: list[str], kric_m: str | None = None) -> dict:
     kric_m이 주어지면 해당 구분 페이지만, 없으면 광역+일반 둘 다 렌더링.
     """
     targets = [_PAGES[kric_m]] if kric_m in _PAGES else list(_PAGES.values())
-    texts = await asyncio.gather(*(_page_text(u) for u in targets),
-                                 return_exceptions=True)
+    results = await asyncio.gather(*(_page_items(u) for u in targets),
+                                   return_exceptions=True)
     progress: list[dict] = []
     errors: list[Exception] = []
-    for res in texts:
+    for res in results:
         if isinstance(res, Exception):
             errors.append(res)
             continue
@@ -118,7 +142,7 @@ async def get_progress(keywords: list[str], kric_m: str | None = None) -> dict:
         "count": len(progress),
         "progress": progress,
         "source": "krna_progress",
-        "note": "HTML 스크래핑 휴리스틱 — 사업명은 페이지 컨텍스트 추정값",
+        "note": "국가철도공단 주요사업현황 HTML 스크래핑(월 단위 공정률)",
     }
 
 

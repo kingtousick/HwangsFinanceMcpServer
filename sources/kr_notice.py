@@ -3,28 +3,31 @@
 철도/광역교통 사업의 '고시·인허가' 신호를 잡는다. 기본계획/실시계획 고시가 관보에
 실리면 사업이 법적으로 확정된 것. 사업명/노선 키워드로 고시 레코드를 필터링한다.
 
-**중요**: 이 데이터는 OpenAPI가 아니라 파일데이터(CSV/JSON/XML)다. data.go.kr의 파일
-다운로드 URL에서 JSON 본문을 받아 메모리에서 키워드 필터한다. 실시간 API가 아니라
-기관이 주기적으로 갱신하는 스냅샷이므로 캐시 TTL을 길게(6시간) 가져간다.
+**중요**: 이 데이터는 파일데이터지만, 공공데이터포털이 3단계+ 파일데이터를 **odcloud.kr
+오픈API(REST JSON)로 자동변환**해 제공한다(data.go.kr/data/15114027). 따라서 실제 호출은
+  https://api.odcloud.kr/api/15114027/v1/uddi:<uuid>?serviceKey=<KEY>&page=1&perPage=..
+형식이며 응답은 {"data":[...], "totalCount":.., ...}. serviceKey는 data.go.kr Decoding
+키(core.datago)로 코드가 붙인다 — 환경변수엔 **엔드포인트 URL만**(uddi 포함) 넣으면 된다.
+실시간이 아니라 주기 갱신 스냅샷이므로 캐시 TTL을 길게(6시간) 가져간다.
 
-data.go.kr 데이터셋(국가철도공단 1611000 계열):
+data.go.kr 데이터셋(국가철도공단 관보고시 기본정보 15114027 등):
   - 국가철도공단_관보고시 기본정보   (kind='기본')
   - 국가철도공단_기본계획 고시       (kind='계획')
   - 국가철도공단_관보고시 세목정보   (kind='세목')
 
 --- needs-verification ---------------------------------------------------------
-파일데이터의 직접 다운로드 URL은 데이터셋 페이지에서 확정해야 한다(고정 URL이 갱신될 수
-있음). 코드 변경 없이 환경변수로 주입한다(JSON 형식 URL 권장):
-  KRNA_NOTICE_URL_BASIC  : 관보고시 기본정보 JSON 다운로드 URL  (kind='기본')
-  KRNA_NOTICE_URL_PLAN   : 기본계획 고시 JSON 다운로드 URL      (kind='계획')
-  KRNA_NOTICE_URL_DETAIL : 관보고시 세목정보 JSON 다운로드 URL  (kind='세목')
+데이터셋의 'OpenAPI/미리보기' 탭에서 보이는 **odcloud.kr 엔드포인트 URL(uddi 포함)**을
+환경변수로 주입한다(키 없이 URL만 — serviceKey는 코드가 첨부):
+  KRNA_NOTICE_URL_BASIC  : 관보고시 기본정보 엔드포인트 URL  (kind='기본')
+  KRNA_NOTICE_URL_PLAN   : 기본계획 고시 엔드포인트 URL      (kind='계획')
+  KRNA_NOTICE_URL_DETAIL : 관보고시 세목정보 엔드포인트 URL  (kind='세목')
 """
 from __future__ import annotations
 
-import json
 import os
 
 from core import http
+from core.datago import data_go_key
 
 _KIND_ENV = {
     "기본": "KRNA_NOTICE_URL_BASIC",
@@ -55,9 +58,14 @@ def _first(d: dict, keys: tuple):
     return None
 
 
-def _records(text: str) -> list[dict]:
-    """파일 본문(JSON)을 레코드 리스트로. {records:[...]}/{data:[...]}/평면 list 대응."""
-    data = json.loads(text)
+def _records(data) -> list[dict]:
+    """응답(JSON dict/list)을 레코드 리스트로. {data:[...]}/{records:[...]}/평면 list 대응.
+
+    문자열이 오면(파일 직접 다운로드 등) json.loads로 먼저 파싱.
+    """
+    if isinstance(data, str):
+        import json
+        data = json.loads(data)
     if isinstance(data, list):
         return [r for r in data if isinstance(r, dict)]
     if isinstance(data, dict):
@@ -92,8 +100,15 @@ async def search_notices(keywords: list[str], kind: str = "기본") -> dict:
 
     kind: '기본'(관보고시 기본정보)/'계획'(기본계획 고시)/'세목'(세목정보).
     """
-    text = await http.get_text(_url(kind), retries=1)
-    records = _records(text)
+    url = _url(kind)
+    # odcloud.kr 자동변환 API는 serviceKey + page/perPage 파라미터가 필요.
+    if "odcloud.kr" in url or "/api/" in url:
+        payload = await http.get_json(url, params={
+            "serviceKey": data_go_key(), "page": "1", "perPage": "1000",
+        }, retries=1)
+    else:
+        payload = await http.get_text(url, retries=1)   # 원시 파일 URL 직접 다운로드
+    records = _records(payload)
     hits = [_notice(r) for r in records if _matches(r, keywords)]
     hits.sort(key=lambda n: str(n.get("고시일") or ""), reverse=True)
     return {

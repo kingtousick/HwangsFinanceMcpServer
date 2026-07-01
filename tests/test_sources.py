@@ -334,6 +334,38 @@ def test_resolve_line():
     free = resolve_line("어떤신설노선")                      # 미수록 → passthrough
     assert free["preset"] is False
     assert free["keywords"] == ["어떤신설노선"]
+    assert free["agencies"] is None
+    # 9호선 연장 프리셋: 정밀 키워드 + 기관 힌트
+    n9 = resolve_line("9호선 연장")
+    assert n9["preset"] is True and n9["line"] == "9호선 연장"
+    assert "고덕강일" in n9["keywords"]
+    assert "서울교통공사" in n9["agencies"]
+    assert resolve_line("고덕강일")["line"] == "9호선 연장"    # 키워드로도 매칭
+
+
+_G2B_AGENCY_JSON = {"response": {"header": {"resultCode": "00", "resultMsg": "정상"},
+    "body": {"pageNo": 1, "numOfRows": 10, "totalCount": 2, "items": [
+        {"bidNtceNo": "A1", "bidNtceOrd": "00",
+         "bidNtceNm": "9호선 2,3단계 도상 보수공사", "ntceInsttNm": "서울교통공사",
+         "dminsttNm": "서울교통공사", "bidNtceDt": "2026-06-20 10:00:00"},
+        {"bidNtceNo": "A2", "bidNtceOrd": "00",
+         "bidNtceNm": "국도79호선 낙석 정비공사", "ntceInsttNm": "경상남도 동부도로관리사업소",
+         "dminsttNm": "경상남도", "bidNtceDt": "2026-06-19 10:00:00"}]}}}
+
+
+@respx.mock
+async def test_construction_bids_agency_filter(monkeypatch):
+    """숫자 노선명 노이즈(국도79호선)를 발주기관 필터로 걸러낸다."""
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://apis.data.go.kr/1230000").mock(
+        return_value=httpx.Response(200, json=_G2B_AGENCY_JSON))
+    # agency 미지정: '9호선' 부분일치로 도로공고까지 2건
+    loose = await srv.get_construction_bids("9호선")
+    assert loose["count"] == 2
+    # agency 지정: 서울교통공사 발주만 1건
+    tight = await srv.get_construction_bids("9호선", agency="서울교통공사")
+    assert tight["count"] == 1
+    assert tight["bids"][0]["공고번호"] == "A1"
 
 
 _G2B_JSON = {"response": {"header": {"resultCode": "00", "resultMsg": "정상"},
@@ -358,9 +390,39 @@ async def test_construction_bids_ok(monkeypatch):
     assert b["공고번호"] == "20260601234"
     assert b["추정가격"] == 120000000000.0
     assert b["발주기관"] == "국가철도공단"
-    # 프리셋이면 여러 키워드로 검색하므로 호출이 1회 이상
+    assert res["scanned"] >= 1
+    # 서버가 키워드 필터를 무시하므로 bidNtceNm을 보내지 않고 날짜범위만 조회한다.
     assert route.call_count >= 1
-    assert route.calls[0].request.url.params["bidNtceNm"]  # 공고명 키워드 전달
+    params = route.calls[0].request.url.params
+    assert "bidNtceNm" not in params
+    assert params["inqryBgnDt"] and params["inqryEndDt"]
+
+
+@respx.mock
+async def test_construction_bids_client_filter_excludes_nonmatch(monkeypatch):
+    """서버는 전량 방출 → 공고명이 노선 키워드와 안 맞으면 클라이언트에서 걸러진다."""
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://apis.data.go.kr/1230000").mock(
+        return_value=httpx.Response(200, json=_G2B_JSON))
+    res = await srv.get_construction_bids("신안산선")   # 목 공고명은 GTX-A라 매칭 0
+    assert res["source"] == "g2b"
+    assert res["count"] == 0
+    assert res["scanned"] >= 1
+
+
+_G2B_ERR_JSON = {"nkoneps.com.response.ResponseError": {
+    "header": {"resultCode": "07", "resultMsg": "입력범위값 초과 에러"}}}
+
+
+@respx.mock
+async def test_construction_bids_error_envelope_not_swallowed(monkeypatch):
+    """에러 봉투를 빈 결과로 위장하지 않고 fallback으로 강등하는지."""
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://apis.data.go.kr/1230000").mock(
+        return_value=httpx.Response(200, json=_G2B_ERR_JSON))
+    res = await srv.get_construction_bids("GTX-A")
+    assert "error" in res
+    assert res["source"] == "fallback"
 
 
 async def test_construction_bids_no_key_returns_fallback(monkeypatch):
@@ -427,6 +489,22 @@ async def test_rail_notices_filter(monkeypatch):
     assert res["notices"][0]["고시번호"] == "2026-100"
 
 
+@respx.mock
+async def test_rail_notices_odcloud_endpoint(monkeypatch):
+    """odcloud.kr 엔드포인트면 serviceKey를 붙이고 {data:[...]} 응답을 파싱한다."""
+    monkeypatch.setenv("KRNA_NOTICE_URL_BASIC",
+                       "https://api.odcloud.kr/api/15114027/v1/uddi:abc")
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    route = respx.get(url__startswith="https://api.odcloud.kr/api/15114027").mock(
+        return_value=httpx.Response(200, json={"data": _NOTICE_JSON["records"],
+                                               "totalCount": 2}))
+    res = await srv.get_rail_notices("7호선 청라연장")
+    assert res["source"] == "krna_notice"
+    assert res["count"] == 1
+    assert route.calls[0].request.url.params["serviceKey"] == "dummy-key"
+    assert route.calls[0].request.url.params["perPage"]
+
+
 async def test_rail_notices_no_url_returns_fallback(monkeypatch):
     monkeypatch.delenv("KRNA_NOTICE_URL_BASIC", raising=False)
     res = await srv.get_rail_notices("GTX-A")
@@ -436,11 +514,18 @@ async def test_rail_notices_no_url_returns_fallback(monkeypatch):
 
 def test_kr_progress_extract():
     from sources.kr_progress import _extract
-    text = ("기타 내용 ... 수도권광역급행철도 A노선 건설사업 '26.3월 기준 공정률 19.4% 이며 "
-            "일반철도 어쩌고 공정률 3.9%")
-    out = _extract(text, ["수도권광역급행철도 A", "GTX-A"])
-    assert len(out) == 1
-    assert out[0]["공정률_pct"] == 19.4
+    # 실제 페이지 구조: li별 (제목, 패널본문). 공정률은 "('26.3월 기준) 68.67%"처럼
+    # 기준월 숫자가 공정률과 퍼센트 사이에 낀다. 매칭은 제목(사업명)만 본다.
+    items = [
+        {"title": "수도권 광역급행철도 A노선(BTO)",
+         "text": "사업내용 ... 추진현황 삼성역 개통 공정률 ('26.3월 기준) 99.9%"},
+        {"title": "부전-마산 복선전철(BTL)",
+         "text": "GTX-A 연계 어쩌고 추진현황 공사중 공정률 ('26.3월 기준) 99.5%"},
+    ]
+    out = _extract(items, ["수도권광역급행철도 A", "GTX-A"])
+    assert len(out) == 1                              # 제목만 매칭 → 부전-마산 본문 언급 무시
+    assert out[0]["사업명"] == "수도권 광역급행철도 A노선(BTO)"
+    assert out[0]["공정률_pct"] == 99.9
     assert out[0]["기준월"] == "2026-03"
 
 

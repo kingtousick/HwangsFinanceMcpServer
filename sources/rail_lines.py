@@ -17,6 +17,8 @@ import re
 
 # 별칭 → 검색 키워드 후보. kric_m은 국가철도공단 주요사업현황 페이지 구분
 # ('05010402'=광역철도, '05010302'=일반철도)으로 공정률 스크래핑 힌트.
+# agencies(선택): 발주/수요기관 필터 힌트. 숫자 노선명("9호선")이 도로 노선번호
+# (국도79호선·소로2-9호선 등)에 부분일치로 걸리는 노이즈를 기관으로 걸러낸다.
 RAIL_LINES: dict[str, dict] = {
     "GTX-A": {
         "keywords": ["수도권광역급행철도 A", "GTX-A", "GTX A", "삼성동탄", "운정삼성"],
@@ -66,6 +68,15 @@ RAIL_LINES: dict[str, dict] = {
         "keywords": ["위례신사선", "위례신사 도시철도"],
         "kric_m": "05010402",
     },
+    "9호선 연장": {
+        # 서울 9호선 4단계(강동~고덕강일·미사) 및 인천 검암 직결 연장. 숫자 노선명이라
+        # 정밀 키워드 + 기관 필터 병행(운영구간 보수/도로 노선번호 노이즈 제거).
+        "keywords": ["9호선 4단계", "9호선 연장", "고덕강일", "9호선 검암",
+                     "9호선 공항철도", "강일지구 9호선"],
+        "kric_m": "05010402",
+        "agencies": ["서울교통공사", "서울특별시", "서울시", "국가철도공단",
+                     "도시기반시설", "인천광역시", "인천교통공사"],
+    },
 }
 
 
@@ -90,7 +101,7 @@ def resolve_line(query: str) -> dict:
     """노선 프리셋이면 등록된 키워드 세트를, 아니면 입력 자체를 단일 키워드로 반환.
 
     반환: {"line": <별칭 또는 입력>, "keywords": [...], "kric_m": <구분 or None>,
-           "preset": bool}.
+           "agencies": <기관 힌트 리스트 or None>, "preset": bool}.
     """
     q = _norm(query)
     flat = re.sub(r"[\s\-~]", "", q).lower()
@@ -101,6 +112,8 @@ def resolve_line(query: str) -> dict:
             "line": alias,
             "keywords": list(info["keywords"]),
             "kric_m": info.get("kric_m"),
+            "agencies": info.get("agencies"),
             "preset": True,
         }
-    return {"line": q, "keywords": [q], "kric_m": None, "preset": False}
+    return {"line": q, "keywords": [q], "kric_m": None, "agencies": None,
+            "preset": False}

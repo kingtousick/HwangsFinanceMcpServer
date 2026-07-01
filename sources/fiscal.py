@@ -53,11 +53,27 @@ def _first(d: dict, keys: tuple) -> object:
 
 
 def _extract_rows(payload) -> list[dict]:
-    """열린재정 표준 응답에서 레코드 리스트 추출. 결과코드 비정상이면 예외."""
+    """열린재정 표준 응답에서 레코드 리스트 추출. 결과코드 비정상이면 예외.
+
+    열린재정은 Type=json이어도 본문을 JSON 문자열로 이중 인코딩해 보내는 경우가 있어
+    (r.json()이 dict가 아닌 str 반환) str이면 한 번 더 json.loads로 풀어준다.
+    """
+    if isinstance(payload, str):
+        import json
+        try:
+            payload = json.loads(payload)
+        except ValueError as e:
+            raise RuntimeError(f"fiscal non-JSON response: {payload[:80]}") from e
     if isinstance(payload, list):
         return [r for r in payload if isinstance(r, dict)]
     if not isinstance(payload, dict):
         raise RuntimeError(f"unexpected fiscal payload: {type(payload).__name__}")
+    # 최상위 에러 봉투({"RESULT":{"CODE":"ERROR-310",..}})는 빈 결과로 위장 말고 예외로.
+    top = payload.get("RESULT")
+    if isinstance(top, dict):
+        code = top.get("CODE", "")
+        if code and "00" not in code and "INFO" not in code:
+            raise RuntimeError(f"fiscal error {code}: {top.get('MESSAGE')}")
     # 평면 구조 우선
     for k in ("row", "data", "items", "list"):
         v = payload.get(k)
@@ -97,14 +113,17 @@ def _project(r: dict) -> dict:
 async def _search_one(keyword: str, rows: int) -> list[dict]:
     api = os.environ.get("OPEN_FISCAL_API_NAME", _DEFAULT_API_NAME)
     kw_param = os.environ.get("OPEN_FISCAL_KW_PARAM", _DEFAULT_KW_PARAM)
+    # 열린재정은 API명을 경로가 아니라 SERVICE 쿼리 파라미터로 받는다(실측: 경로형은 404,
+    # base?SERVICE=... 형식만 유효. 잘못된 이름이면 RESULT.CODE=ERROR-310).
     params = {
         "Key": _key(),
         "Type": "json",
+        "SERVICE": api,
         "pIndex": "1",
         "pSize": str(rows),
         kw_param: keyword,
     }
-    payload = await http.get_json(f"{_BASE}/{api}", params=params, retries=1)
+    payload = await http.get_json(_BASE, params=params, retries=1)
     return _extract_rows(payload)
 
 
