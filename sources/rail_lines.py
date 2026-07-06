@@ -19,21 +19,35 @@ import re
 # ('05010402'=광역철도, '05010302'=일반철도)으로 공정률 스크래핑 힌트.
 # agencies(선택): 발주/수요기관 필터 힌트. 숫자 노선명("9호선")이 도로 노선번호
 # (국도79호선·소로2-9호선 등)에 부분일치로 걸리는 노이즈를 기관으로 걸러낸다.
+# notice_keywords(선택): 관보고시(국가철도공단, data.go.kr 15114027) 전용 별칭. 고시
+# 원문은 대중 명칭이 아니라 사업 구간명으로 표기된다(예: GTX-A→'삼성~동탄 광역급행철도',
+# 대곡소사는 '대곡~소사'/'대곡-소사' 물결·하이픈 혼용). 이 표기는 bids/budget/progress
+# 검색엔 불필요·노이즈라 keywords에 섞지 않고 고시 검색에만 덧붙인다(alias 색인에도 미포함).
+# 실측(2026-07-06) 관보고시 원문에서 확인한 부분일치 substring만 등록.
 RAIL_LINES: dict[str, dict] = {
     "GTX-A": {
         "keywords": ["수도권광역급행철도 A", "GTX-A", "GTX A", "삼성동탄", "운정삼성"],
+        # 고시 원문: "삼성~동탄 광역급행철도"/"삼성-동탄 광역급행철도"(물결·하이픈 혼용).
+        # "동탄 광역급행철도"가 둘 다 포함하는 안전한 부분일치 substring.
+        "notice_keywords": ["동탄 광역급행철도"],
+        # 열린재정 세부사업명 표기. A본선은 '수도권광역급행철도'(무접미) — 부분일치로
+        # B/C노선까지 끌려오므로 '='(정확일치)로 격리. 삼성-동탄 구간은 별도 세부사업.
+        "budget_keywords": ["=수도권광역급행철도", "삼성-동탄"],
         "kric_m": "05010402",
     },
     "GTX-B": {
         "keywords": ["수도권광역급행철도 B", "GTX-B", "GTX B", "송도마석", "용산상봉"],
+        "budget_keywords": ["수도권광역급행철도B노선", "용산-상봉"],
         "kric_m": "05010402",
     },
     "GTX-C": {
         "keywords": ["수도권광역급행철도 C", "GTX-C", "GTX C", "덕정수원"],
+        "budget_keywords": ["수도권광역급행철도C노선"],
         "kric_m": "05010402",
     },
     "신안산선": {
         "keywords": ["신안산선", "안산선 복선전철"],
+        "budget_keywords": ["신안산선"],
         "kric_m": "05010402",
     },
     "월곶판교": {
@@ -54,6 +68,14 @@ RAIL_LINES: dict[str, dict] = {
     },
     "대곡소사": {
         "keywords": ["대곡소사", "대곡~소사", "서해선 대곡소사"],
+        # 고시 원문은 물결(대곡~소사)·하이픈(대곡-소사) 혼용 → 하이픈 표기 보강.
+        "notice_keywords": ["대곡-소사"],
+        "kric_m": "05010402",
+    },
+    "진접선": {
+        # 4호선 연장(당고개~진접, 별내별가람~진접). 8호선 별내선과 별개 사업이다.
+        # 남양주 오남·진접 지역 부동산 선행지표. 관보고시 다수(진접선 복선전철) 있음.
+        "keywords": ["진접선", "진접선 복선전철", "4호선 진접", "당고개 진접"],
         "kric_m": "05010402",
     },
     "서해선": {
@@ -101,7 +123,9 @@ def resolve_line(query: str) -> dict:
     """노선 프리셋이면 등록된 키워드 세트를, 아니면 입력 자체를 단일 키워드로 반환.
 
     반환: {"line": <별칭 또는 입력>, "keywords": [...], "kric_m": <구분 or None>,
-           "agencies": <기관 힌트 리스트 or None>, "preset": bool}.
+           "agencies": <기관 힌트 리스트 or None>, "notice_keywords": [...],
+           "budget_keywords": [...], "preset": bool}. notice_keywords는 관보고시,
+           budget_keywords는 열린재정(세부사업명 표기) 검색에만 쓰는 별칭(없으면 []).
     """
     q = _norm(query)
     flat = re.sub(r"[\s\-~]", "", q).lower()
@@ -113,7 +137,9 @@ def resolve_line(query: str) -> dict:
             "keywords": list(info["keywords"]),
             "kric_m": info.get("kric_m"),
             "agencies": info.get("agencies"),
+            "notice_keywords": list(info.get("notice_keywords", [])),
+            "budget_keywords": list(info.get("budget_keywords", [])),
             "preset": True,
         }
     return {"line": q, "keywords": [q], "kric_m": None, "agencies": None,
-            "preset": False}
+            "notice_keywords": [], "budget_keywords": [], "preset": False}

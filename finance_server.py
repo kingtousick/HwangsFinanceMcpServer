@@ -319,11 +319,14 @@ async def get_project_budget(query: str, year: int | None = None,
           실제 값에 맞춰야 한다(sources/fiscal.py 참고).
     """
     line = resolve_line(query)
+    # 열린재정은 '세부사업명'(예: 수도권광역급행철도B노선)으로 검색한다. 대중 노선명
+    # (GTX-B 등)과 표기가 달라, 프리셋의 budget_keywords가 있으면 그걸 우선 사용한다.
+    budget_kws = line.get("budget_keywords") or line["keywords"]
 
     async def fetch():
         return await _cascade(
             f"재정사업:{line['line']}",
-            lambda: fiscal.search_budget(line["keywords"], year, rows),
+            lambda: fiscal.search_budget(budget_kws, year, rows),
         )
     return await cached(f"budget:{line['line']}:{year}:{rows}", fetch, _TTL_BUDGET)
 
@@ -339,11 +342,14 @@ async def get_rail_notices(query: str, kind: str = "기본") -> dict:
           고시일, 사업명, 종류}], source}. 기본계획/실시계획 고시는 법적 확정 신호.
     """
     line = resolve_line(query)
+    # 고시 원문은 사업 구간명 표기라 대중 노선명과 다르다(GTX-A→'삼성~동탄 광역급행철도').
+    # 프리셋의 고시 전용 별칭(notice_keywords)을 검색 키워드에 덧붙여 누락을 막는다.
+    notice_kws = line["keywords"] + line.get("notice_keywords", [])
 
     async def fetch():
         return await _cascade(
             f"관보고시:{line['line']}",
-            lambda: kr_notice.search_notices(line["keywords"], kind),
+            lambda: kr_notice.search_notices(notice_kws, kind),
         )
     return await cached(f"notice:{line['line']}:{kind}", fetch, _TTL_NOTICE)
 

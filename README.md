@@ -154,13 +154,18 @@ get_rail_project_status("GTX-A")               # 4개 통합(일부 실패해도
 >   서버에서 무시**하고 날짜범위(≤약 30일) 내 공사공고를 전량 방출하므로, 서버는 날짜를 15일
 >   청크로 나눠 전량 수집 후 **공고명 부분일치로 클라이언트 필터**한다. 스캔량이 커서 첫 호출은
 >   수십 초(이후 30분 캐시). `days`를 줄이면 빨라진다.
-> - **열린재정**(키 OK, SERVICE명 필요): 열린재정은 API명을 **`SERVICE` 쿼리 파라미터**로 받고
->   응답을 JSON 문자열로 이중 인코딩한다(코드가 처리). 로그인 후 데이터셋 'OPEN API 탭'의
->   요청인자에서 **실제 SERVICE명·사업명 검색 파라미터명**을 확인해 `OPEN_FISCAL_API_NAME`/
->   `OPEN_FISCAL_KW_PARAM`에 넣어야 한다(미교정 시 `ERROR-310` → fallback).
-> - **관보고시**(엔드포인트 URL 필요): 파일데이터가 **odcloud.kr 오픈API로 자동변환**된다.
->   데이터셋 'OpenAPI/미리보기' 탭의 `https://api.odcloud.kr/api/15114027/v1/uddi:...` URL을
->   `KRNA_NOTICE_URL_BASIC`에 넣는다(키 아님 — serviceKey는 코드가 첨부). 캐시 6시간.
+> - **열린재정**(✅ 동작): 데이터셋 **"세출/지출 예산편성현황(총지출)"** = 경로형 API
+>   `TotalExpenditure5`를 세부사업명(`SACTV_NM`) 부분일치로 조회한다. 필수 파라미터
+>   `FSCL_YY`(회계연도, 단일)라 **연도별 반복 호출로 시계열**을 만든다(기본 최근 5년).
+>   금액 단위는 **천원**(코드가 억원으로 변환 제공). GTX-A 본선명 '수도권광역급행철도'가
+>   B/C노선의 substring이라, 프리셋 `budget_keywords`에서 `=` 접두어로 **정확일치 격리**한다.
+>   API명/필수코드/검색 파라미터명은 `OPEN_FISCAL_*` 환경변수로 덮어쓸 수 있다(기본값이 실측값).
+> - **관보고시**(✅ 동작): 파일데이터가 **odcloud.kr 오픈API로 자동변환**된다. 데이터셋
+>   'OpenAPI/미리보기' 탭의 `https://api.odcloud.kr/api/15114027/v1/uddi:...` URL을
+>   `KRNA_NOTICE_URL_BASIC`에 넣는다(키 아님 — serviceKey는 코드가 첨부). 전량(≈827건) 받아
+>   고시명 부분일치로 클라 필터, 종류(실시계획/기본계획 등)는 고시명에서 파생. 캐시 6시간.
+>   **주의**: 이 DB는 **국가철도공단 재정사업** 고시라 **민자(BTO) 노선은 없다**(신안산선·
+>   GTX-B/C·별내선 → 0건이 정상). 이들은 예산·발주·공정률로 판단.
 > - **공정률**(✅ 동작): 공식 API 없음 → 국가철도공단 주요사업현황 HTML을 Playwright로 스크래핑
 >   (사업별 아코디언 `li.news`에서 제목+공정률 추출, 월 단위). 사내망은 chromium 다운로드가
 >   TLS MITM으로 막히므로 `channel="msedge"`(시스템 Edge)로 폴백 — `pip install playwright`만

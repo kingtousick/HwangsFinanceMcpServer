@@ -35,12 +35,22 @@ _KIND_ENV = {
     "세목": "KRNA_NOTICE_URL_DETAIL",
 }
 
-# 레코드 필드명 후보(파일 컬럼 표기 차이 흡수).
+# 레코드 필드명 후보(파일 컬럼 표기 차이 흡수). 실측(15114027 기본정보)은 컬럼이
+# '고시명/관보고시번호/고시일자/고시기관명/고시 내용/사업시작일자/사업종료일자'.
 _F_TITLE = ("고시명", "고시제목", "NOTICE_NM", "GOSI_NM", "TITLE")
-_F_NO = ("고시번호", "관보고시번호", "NOTICE_NO", "GOSI_NO")
-_F_DATE = ("고시일", "고시일자", "관보게재일", "NOTICE_DE", "GOSI_DT", "PUBLIC_DE")
+_F_NO = ("관보고시번호", "고시번호", "NOTICE_NO", "GOSI_NO")
+_F_DATE = ("고시일자", "고시일", "관보게재일", "NOTICE_DE", "GOSI_DT", "PUBLIC_DE")
 _F_PROJECT = ("사업명", "노선명", "PROJECT_NM", "BIZ_NM", "LINE_NM")
 _F_TYPE = ("고시구분", "고시종류", "NOTICE_SE", "GOSI_SE", "구분")
+_F_AGENCY = ("고시기관명", "고시기관", "발주기관", "AGENCY_NM")
+_F_CONTENT = ("고시 내용", "고시내용", "NOTICE_CN", "CONTENT")
+_F_BGN = ("사업시작일자", "사업개시일자", "BIZ_BGN_DE")
+_F_END = ("사업종료일자", "사업완료일자", "BIZ_END_DE")
+
+# 고시명에 명시적 '고시구분' 컬럼이 없으므로 제목 텍스트에서 단계를 파생한다.
+# 앞쪽일수록 우선(더 구체적인 표현부터 매칭).
+_TYPE_MARKERS = ("예비타당성", "타당성", "기본계획", "실시계획", "노선지정",
+                 "사업승인", "변경승인", "변경", "승인", "지정", "고시")
 
 
 def _url(kind: str) -> str:
@@ -80,13 +90,34 @@ def _records(data) -> list[dict]:
     return []
 
 
+def _derive_type(title: str) -> str | None:
+    """명시적 고시구분 컬럼이 없을 때 고시명에서 단계 키워드를 추출.
+
+    '실시계획'이 잡히면 착공 임박, '기본계획'/'노선지정'이면 사업 확정 초기 신호.
+    """
+    for m in _TYPE_MARKERS:
+        if m in title:
+            return m
+    return None
+
+
+def _period(r: dict) -> str | None:
+    bgn, end = _first(r, _F_BGN), _first(r, _F_END)
+    if bgn or end:
+        return f"{bgn or '?'}~{end or '?'}"
+    return None
+
+
 def _notice(r: dict) -> dict:
+    title = _first(r, _F_TITLE) or ""
     return {
-        "고시명": _first(r, _F_TITLE),
+        "고시명": title,
         "고시번호": _first(r, _F_NO),
         "고시일": _first(r, _F_DATE),
-        "사업명": _first(r, _F_PROJECT),
-        "종류": _first(r, _F_TYPE),
+        "종류": _first(r, _F_TYPE) or _derive_type(title),
+        "고시기관": _first(r, _F_AGENCY),
+        "사업명": _first(r, _F_PROJECT),   # 이 데이터셋엔 별도 사업명 컬럼 없음(고시명이 대체)
+        "사업기간": _period(r),
     }
 
 

@@ -331,10 +331,20 @@ def test_resolve_line():
     assert "GTX-A" in a["keywords"] and "수도권광역급행철도 A" in a["keywords"]
     assert resolve_line("gtx a")["line"] == "GTX-A"          # 공백/대소문자 무시
     assert resolve_line("삼성동탄")["line"] == "GTX-A"       # 키워드로도 매칭
+    # 고시 전용 별칭: bids/budget용 keywords와 분리, alias 색인엔 미포함
+    assert a["notice_keywords"] == ["동탄 광역급행철도"]
+    assert "동탄 광역급행철도" not in a["keywords"]
+    # 열린재정 세부사업명 별칭: '='는 정확일치 격리(수도권광역급행철도 → B/C노선 오염 방지)
+    assert a["budget_keywords"] == ["=수도권광역급행철도", "삼성-동탄"]
+    assert resolve_line("동탄 광역급행철도")["preset"] is False   # 고시별칭은 색인 안 됨
+    # 진접선 신규 프리셋(4호선 연장, 8호선 별내선과 별개)
+    assert resolve_line("진접선")["line"] == "진접선"
     free = resolve_line("어떤신설노선")                      # 미수록 → passthrough
     assert free["preset"] is False
     assert free["keywords"] == ["어떤신설노선"]
     assert free["agencies"] is None
+    assert free["notice_keywords"] == []
+    assert free["budget_keywords"] == []
     # 9호선 연장 프리셋: 정밀 키워드 + 기관 힌트
     n9 = resolve_line("9호선 연장")
     assert n9["preset"] is True and n9["line"] == "9호선 연장"
@@ -433,34 +443,80 @@ async def test_construction_bids_no_key_returns_fallback(monkeypatch):
     assert res["source"] == "fallback"
 
 
-_FISCAL_JSON = {"ExpenseBudgetTimeSeries": [
+# 열린재정 TotalExpenditure5(경로형) 실측 응답 구조. 금액은 천원 단위.
+_FISCAL_JSON = {"TotalExpenditure5": [
     {"head": [{"list_total_count": 1}, {"RESULT": {"CODE": "INFO-000", "MESSAGE": "정상"}}]},
-    {"row": [{"OFFC_NM": "신안산선 복선전철", "FY": "2026",
-              "Y_PRES_DRYR_BD_AMT": "500000", "EXE_AMT": "120000", "DEPT_NM": "국토교통부"}]}]}
+    {"row": [{"SACTV_NM": "신안산선복선전철", "FSCL_YY": "2026", "PGM_NM": "광역철도건설",
+              "Y_YY_MEDI_KCUR_AMT": 207093000, "Y_YY_DFN_MEDI_KCUR_AMT": 208093000,
+              "OFFC_NM": "국토교통부"}]}]}
+
+# 같은 (사업명,연도)에 전년 마감분(예산 0) 중복행이 섞여 나오는 실제 패턴.
+_FISCAL_DUP_JSON = {"TotalExpenditure5": [{"row": [
+    {"SACTV_NM": "신안산선복선전철", "FSCL_YY": "2024", "Y_YY_MEDI_KCUR_AMT": 207093000},
+    {"SACTV_NM": "신안산선복선전철", "FSCL_YY": "2024", "Y_YY_MEDI_KCUR_AMT": 0}]}]}
+
+# GTX-A 본선명 '수도권광역급행철도'가 B/C노선의 substring이라 부분일치로 함께 끌려온다.
+_FISCAL_GTX_JSON = {"TotalExpenditure5": [{"row": [
+    {"SACTV_NM": "수도권광역급행철도", "FSCL_YY": "2024", "Y_YY_MEDI_KCUR_AMT": 127000000},
+    {"SACTV_NM": "수도권광역급행철도B노선", "FSCL_YY": "2024", "Y_YY_MEDI_KCUR_AMT": 121203000},
+    {"SACTV_NM": "수도권광역급행철도C노선", "FSCL_YY": "2024", "Y_YY_MEDI_KCUR_AMT": 188049000}]}]}
 
 
 @respx.mock
 async def test_project_budget_ok(monkeypatch):
     monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
-    respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
+    route = respx.get(
+        url__startswith="https://openapi.openfiscaldata.go.kr/TotalExpenditure5").mock(
         return_value=httpx.Response(200, json=_FISCAL_JSON))
-    res = await srv.get_project_budget("신안산선")
-    assert res["source"] == "openfiscaldata"
+    res = await srv.get_project_budget("신안산선", year=2026)
+    assert res["source"] == "openfiscaldata:TotalExpenditure5"
     assert res["count"] == 1
     p = res["projects"][0]
-    assert p["사업명"] == "신안산선 복선전철"
+    assert p["사업명"] == "신안산선복선전철"
     assert p["연도"] == "2026"
-    assert p["예산액"] == 500000.0
-    assert p["집행액"] == 120000.0
+    assert p["예산액_천원"] == 207093000.0
+    assert p["예산액_억원"] == 2070.9        # 207093000천원 ÷ 100000 = 2070.9억
+    assert p["부처"] == "국토교통부"
+    # 경로형 호출 + 필수 파라미터 전송 확인(SERVICE= 쿼리 아님)
+    req = route.calls[0].request
+    assert req.url.path.endswith("/TotalExpenditure5")
+    assert req.url.params["FSCL_YY"] == "2026"
+    assert req.url.params["SACTV_NM"] == "신안산선"     # budget_keywords 사용
+    assert req.url.params["BDG_FND_DIV_CD"] == "1"
+    assert req.url.params["ANEXP_INQ_STND_CD"] == "1"
 
 
 @respx.mock
-async def test_project_budget_year_filter(monkeypatch):
+async def test_project_budget_uses_fscl_yy(monkeypatch):
+    """FSCL_YY(회계연도)는 필수·단일이라 year 인자가 그대로 파라미터로 나간다."""
+    monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
+    route = respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
+        return_value=httpx.Response(200, json=_FISCAL_JSON))
+    await srv.get_project_budget("신안산선", year=2024)
+    assert route.calls[0].request.url.params["FSCL_YY"] == "2024"
+
+
+@respx.mock
+async def test_project_budget_dedup_keeps_max(monkeypatch):
+    """(사업명,연도) 중복 시 예산액 최대 행만 남겨 전년 마감분(0원)을 버린다."""
     monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
     respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
-        return_value=httpx.Response(200, json=_FISCAL_JSON))
-    res = await srv.get_project_budget("신안산선", year=2025)  # 2026만 있으므로 0건
-    assert res["count"] == 0
+        return_value=httpx.Response(200, json=_FISCAL_DUP_JSON))
+    res = await srv.get_project_budget("신안산선", year=2024)
+    assert res["count"] == 1
+    assert res["projects"][0]["예산액_천원"] == 207093000
+
+
+@respx.mock
+async def test_fiscal_exact_match_isolates(monkeypatch):
+    """budget_keywords의 '=' 정확일치가 부분일치 오염(B/C노선)을 제거한다."""
+    from sources import fiscal
+    monkeypatch.setenv("OPEN_FISCAL_API_KEY", "dummy-key")
+    respx.get(url__startswith="https://openapi.openfiscaldata.go.kr").mock(
+        return_value=httpx.Response(200, json=_FISCAL_GTX_JSON))
+    res = await fiscal.search_budget(["=수도권광역급행철도"], year=2024)
+    names = {p["사업명"] for p in res["projects"]}
+    assert names == {"수도권광역급행철도"}     # B노선/C노선 제외
 
 
 async def test_project_budget_no_key_returns_fallback(monkeypatch):
