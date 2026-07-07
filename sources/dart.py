@@ -141,11 +141,12 @@ async def disclosures(query: str, days: int = 90, rows: int = 20) -> dict:
         raise RuntimeError(f"dart error {status}: {data.get('message')}")
 
     items = [{
-        "제목": r.get("report_nm"),
+        # DART는 report_nm/flr_nm에 공백 패딩을 붙여 보내므로 정리한다.
+        "제목": (r.get("report_nm") or "").strip() or None,
         "접수일": r.get("rcept_dt"),
-        "제출인": r.get("flr_nm"),
+        "제출인": (r.get("flr_nm") or "").strip() or None,
         "시장": _CORP_CLS.get(r.get("corp_cls"), r.get("corp_cls")),
-        "비고": r.get("rm") or None,
+        "비고": (r.get("rm") or "").strip() or None,
         "접수번호": r.get("rcept_no"),
         "url": _VIEWER_URL.format(rcept_no=r.get("rcept_no")),
     } for r in rows_list]
