@@ -271,6 +271,85 @@ async def get_jeonse_ratio(region: str, deal_ym: str, months: int = 1,
     return await cached(f"jeonse_ratio:{code}:{ym}:{months}:{rows}", fetch)
 
 
+# ---------------------------------------------------------------- 오피스텔
+
+
+@mcp.tool()
+async def get_offi_trade(region: str, deal_ym: str, rows: int = 50) -> dict:
+    """오피스텔 매매 실거래가(국토교통부 공공데이터포털). MOLIT_API_KEY 필요
+    (오피스텔 매매 API 별도 활용신청 필요 — 미신청 시 403).
+
+    region: 지역명 또는 5자리 시군구 법정동코드(get_apt_trade와 동일 자동 변환).
+    deal_ym: 계약 년월 'YYYYMM'/'YYYY-MM'.
+    반환 items: {apt(오피스텔명), deal_amount(만원), area(전용㎡), pyeong(전용 평수),
+                price_per_pyeong(전용 평당가 만원/평), floor, build_year, dong, jibun, date}.
+    평당가는 전용면적 기준.
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"오피스텔매매:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
+    async def fetch():
+        return await _cascade(
+            f"오피스텔매매:{code}:{ym}",
+            lambda: molit.offi_trade(code, ym, rows),
+        )
+    return await cached(f"offi_trade:{code}:{ym}:{rows}", fetch)
+
+
+@mcp.tool()
+async def get_offi_trade_summary(region: str, deal_ym: str, months: int = 1,
+                                 rows: int = 1000) -> dict:
+    """오피스텔 매매 실거래가를 단지(건물)별 평균 평당가로 집계. MOLIT_API_KEY 필요.
+
+    region: 지역명 또는 5자리 코드. deal_ym: 기준월 'YYYYMM'/'YYYY-MM'.
+    months: 기준월 포함 직전 N개월 합산(기본 1, 최대 12). 거래가 적은 오피스텔은
+            months=3~6으로 표본을 늘린다.
+    반환: {name, region_code, deal_ym, months, period, complex_count, deal_count,
+          items:[{apt(오피스텔명), dong, count, avg_price_per_pyeong,
+                  min/max_price_per_pyeong, avg_deal_amount, avg_pyeong}], source}.
+    포트폴리오 오피스텔 평가(get_portfolio_snapshot의 apt type)에도 활용 가능.
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"오피스텔단지평당가:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
+    async def fetch():
+        return await _cascade(
+            f"오피스텔단지평당가:{code}:{ym}:{months}",
+            lambda: molit.offi_trade_summary(code, ym, rows, months),
+        )
+    return await cached(f"offi_trade_summary:{code}:{ym}:{months}:{rows}", fetch)
+
+
+@mcp.tool()
+async def get_offi_rent(region: str, deal_ym: str, rows: int = 50) -> dict:
+    """오피스텔 전월세 실거래가(국토교통부 공공데이터포털). MOLIT_API_KEY 필요
+    (오피스텔 전월세 API 별도 활용신청 필요).
+
+    region: 지역명 또는 5자리 코드. deal_ym: 'YYYYMM'/'YYYY-MM'.
+    반환 items: {apt(오피스텔명), deposit(보증금 만원), monthly_rent(월세 만원, 0이면 전세),
+                area(전용㎡), pyeong, deposit_per_pyeong(전용 보증금 평당가 만원/평),
+                floor, build_year, dong, jibun, date}.
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"오피스텔전월세:{region}", e)
+    ym = _normalize_ym(deal_ym)
+
+    async def fetch():
+        return await _cascade(
+            f"오피스텔전월세:{code}:{ym}",
+            lambda: molit.offi_rent(code, ym, rows),
+        )
+    return await cached(f"offi_rent:{code}:{ym}:{rows}", fetch)
+
+
 # ------------------------------------------------ 공사현황(철도/광역교통)
 
 # 변화가 느린 데이터라 TTL을 길게: 입찰 30분, 고시/공정률 6시간, 예산 1일.

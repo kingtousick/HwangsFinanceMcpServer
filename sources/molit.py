@@ -3,10 +3,15 @@
 아파트 매매/전월세 실거래가를 조회한다. 응답은 XML(stdlib ElementTree로 파싱).
 
 엔드포인트(공공데이터포털 1613000 국토교통부):
-  매매  : https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev
-  전월세: https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent
+  아파트 매매  : https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev
+  아파트 전월세: https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent
+  오피스텔 매매  : https://apis.data.go.kr/1613000/RTMSDataSvcOffiTrade/getRTMSDataSvcOffiTrade
+  오피스텔 전월세: https://apis.data.go.kr/1613000/RTMSDataSvcOffiRent/getRTMSDataSvcOffiRent
 파라미터: serviceKey(인증키), LAWD_CD(5자리 시군구 법정동코드),
           DEAL_YMD(YYYYMM), pageNo, numOfRows.
+
+오피스텔 API는 아파트와 필드가 동일하고 건물명 태그만 다르다(aptNm → offiNm). 매매/전월세
+API 모두 data.go.kr에서 별도 활용신청이 필요하다(아파트 키와 동일 계정이면 신청만 추가).
 
 인증키는 data.go.kr 활용신청 후 발급되는 **Decoding(일반) 키**를 MOLIT_API_KEY 환경변수로
 주입한다(httpx가 자동 URL 인코딩하므로 Encoding 키를 쓰면 이중 인코딩으로 깨진다).
@@ -34,6 +39,10 @@ _TRADE_URL = ("https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/"
               "getRTMSDataSvcAptTradeDev")
 _RENT_URL = ("https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/"
              "getRTMSDataSvcAptRent")
+_OFFI_TRADE_URL = ("https://apis.data.go.kr/1613000/RTMSDataSvcOffiTrade/"
+                   "getRTMSDataSvcOffiTrade")
+_OFFI_RENT_URL = ("https://apis.data.go.kr/1613000/RTMSDataSvcOffiRent/"
+                  "getRTMSDataSvcOffiRent")
 
 
 def _key() -> str:
@@ -96,12 +105,14 @@ def _check_header(root: ET.Element) -> None:
         raise RuntimeError(f"MOLIT gateway error {reason}: {msg}")
 
 
-def _trade_item(it: ET.Element) -> dict:
+def _trade_item(it: ET.Element, name_tag: str = "aptNm") -> dict:
     amount = to_float((_t(it, "dealAmount") or "").replace(",", ""))  # 만원
     area = to_float(_t(it, "excluUseAr"))  # 전용면적 m^2
     pyeong, price_per_pyeong = _per_pyeong(amount, area)
     return {
-        "apt": _t(it, "aptNm"),
+        # 오피스텔은 name_tag='offiNm'. 출력 키는 apt(=단지/건물명)로 통일해
+        # summarize_trades/jeonse_ratio를 그대로 재사용한다.
+        "apt": _t(it, name_tag),
         "deal_amount": amount,
         "area": area,
         "pyeong": pyeong,                      # 전용 평수
@@ -114,13 +125,13 @@ def _trade_item(it: ET.Element) -> dict:
     }
 
 
-def _rent_item(it: ET.Element) -> dict:
+def _rent_item(it: ET.Element, name_tag: str = "aptNm") -> dict:
     deposit = to_float((_t(it, "deposit") or "").replace(",", ""))           # 보증금 만원
     monthly = to_float((_t(it, "monthlyRent") or "").replace(",", ""))       # 월세 만원
     area = to_float(_t(it, "excluUseAr"))
     pyeong, deposit_per_pyeong = _per_pyeong(deposit, area)  # 보증금 기준(전세 비교용)
     return {
-        "apt": _t(it, "aptNm"),
+        "apt": _t(it, name_tag),
         "deposit": deposit,
         "monthly_rent": monthly,
         "area": area,
@@ -193,17 +204,18 @@ def summarize_trades(items: list[dict]) -> list[dict]:
     return out
 
 
-async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
-                            months: int = 1) -> dict:
-    """단지별 평균 평당가 집계. 의미있는 평균을 위해 기본 rows=1000(해당 월 전량).
+async def _trade_summary(fetch_one, name: str, region_code: str, deal_ym: str,
+                         rows: int, months: int) -> dict:
+    """매매 단지별 평균 평당가 집계 공통 로직(아파트/오피스텔 공유).
 
-    months>1이면 기준월 포함 직전 N개월(최대 12) 매매 거래를 합산해 평균을 낸다.
-    일부 월 실패는 건너뛰고, 전부 실패 시에만 예외를 올려 상위에서 fallback.
+    fetch_one: (region_code, ym, rows) -> {items:[...]} 형태의 매매 조회 코루틴 팩토리.
+    months>1이면 기준월 포함 직전 N개월(최대 12) 거래를 합산. 일부 월 실패는 건너뛰고
+    전부 실패 시에만 예외를 올려 상위에서 fallback.
     """
     months = max(1, min(12, months))
     yms = _months_back(deal_ym, months)
     results = await asyncio.gather(
-        *(apt_trade(region_code, ym, rows) for ym in yms),
+        *(fetch_one(region_code, ym, rows) for ym in yms),
         return_exceptions=True,
     )
     trade_items: list[dict] = []
@@ -215,7 +227,7 @@ async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
 
     summary = summarize_trades(trade_items)
     return {
-        "name": "아파트매매 단지별 평균평당가",
+        "name": name,
         "region_code": region_code,
         "deal_ym": deal_ym,
         "months": months,
@@ -227,10 +239,43 @@ async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
     }
 
 
+async def apt_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
+                            months: int = 1) -> dict:
+    """단지별 평균 평당가 집계. 의미있는 평균을 위해 기본 rows=1000(해당 월 전량).
+
+    months>1이면 기준월 포함 직전 N개월(최대 12) 매매 거래를 합산해 평균을 낸다.
+    일부 월 실패는 건너뛰고, 전부 실패 시에만 예외를 올려 상위에서 fallback.
+    """
+    return await _trade_summary(apt_trade, "아파트매매 단지별 평균평당가",
+                                region_code, deal_ym, rows, months)
+
+
 async def apt_rent(region_code: str, deal_ym: str, rows: int = 50) -> dict:
     """아파트 전월세 실거래가. 보증금/월세(만원). 월세 0이면 전세."""
     return await _fetch(_RENT_URL, "아파트전월세실거래", region_code, deal_ym,
                         rows, _rent_item)
+
+
+# ------------------------------------------------------------- 오피스텔
+
+
+async def offi_trade(region_code: str, deal_ym: str, rows: int = 50) -> dict:
+    """오피스텔 매매 실거래가. items의 'apt'는 오피스텔명. region_code=5자리, deal_ym='YYYYMM'."""
+    return await _fetch(_OFFI_TRADE_URL, "오피스텔매매실거래", region_code, deal_ym,
+                        rows, lambda it: _trade_item(it, "offiNm"))
+
+
+async def offi_trade_summary(region_code: str, deal_ym: str, rows: int = 1000,
+                             months: int = 1) -> dict:
+    """오피스텔 매매를 단지(건물)별 평균 평당가로 집계. months>1이면 직전 N개월 합산."""
+    return await _trade_summary(offi_trade, "오피스텔매매 단지별 평균평당가",
+                                region_code, deal_ym, rows, months)
+
+
+async def offi_rent(region_code: str, deal_ym: str, rows: int = 50) -> dict:
+    """오피스텔 전월세 실거래가. 보증금/월세(만원). 월세 0이면 전세. items의 'apt'는 오피스텔명."""
+    return await _fetch(_OFFI_RENT_URL, "오피스텔전월세실거래", region_code, deal_ym,
+                        rows, lambda it: _rent_item(it, "offiNm"))
 
 
 def jeonse_ratio(trade_items: list[dict], rent_items: list[dict]) -> list[dict]:

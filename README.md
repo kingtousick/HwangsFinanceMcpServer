@@ -17,6 +17,9 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_apt_trade_summary(region, deal_ym, months=1)` | 단지별 평균 평당가 집계 | `"강남구"`, `"2024-06"`, `6` |
 | `get_apt_rent(region, deal_ym)` | 아파트 전월세 실거래가 | `"강남구"`, `"2024-06"` |
 | `get_jeonse_ratio(region, deal_ym, months=1)` | 단지별 전세가율 집계 | `"강남구"`, `"2024-06"`, `6` |
+| `get_offi_trade(region, deal_ym)` | 오피스텔 매매 실거래가(평수·평당가) | `"강남구"`, `"2024-06"` |
+| `get_offi_trade_summary(region, deal_ym, months=1)` | 오피스텔 단지별 평균 평당가 집계 | `"강남구"`, `"2024-06"`, `6` |
+| `get_offi_rent(region, deal_ym)` | 오피스텔 전월세 실거래가 | `"강남구"`, `"2024-06"` |
 | `get_construction_bids(query, biz="공사", days=30, agency=None)` | 나라장터 입찰공고(발주·착공) | `"GTX-A"`, `"9호선 연장"` |
 | `get_project_budget(query, year=None)` | 열린재정 재정사업 예산·집행(예타·재정) | `"신안산선"` |
 | `get_rail_notices(query, kind="기본")` | 국가철도공단 관보고시(고시·인허가) | `"7호선 청라연장"` |
@@ -97,7 +100,9 @@ py -m venv .venv
 
 ### 부동산 실거래가 사용법
 1. [공공데이터포털](https://www.data.go.kr)에서 **"국토교통부_아파트 매매 실거래가 자료"**,
-   **"국토교통부_아파트 전월세 실거래가 자료"** 활용신청(무료).
+   **"국토교통부_아파트 전월세 실거래가 자료"** 활용신청(무료). 오피스텔 도구를 쓰려면
+   **"국토교통부_오피스텔 매매 실거래가 자료"**, **"국토교통부_오피스텔 전월세 실거래가 자료"**도
+   추가 활용신청(같은 키/계정, 데이터셋별 승인 필요 — 미신청 데이터셋은 403).
 2. 마이페이지 → 인증키에서 **Decoding(일반) 키**를 복사해 `MOLIT_API_KEY`에 설정
    (Encoding 키를 쓰면 이중 인코딩으로 인증 실패).
 3. `region_code`는 **5자리 시군구 법정동코드**(예: 강남구 `11680`, 송파구 `11710`).
