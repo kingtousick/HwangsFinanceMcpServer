@@ -23,7 +23,8 @@ from mcp.server.fastmcp import FastMCP
 from core.cache import cached
 from core.schema import fail
 from sources import (naver, yahoo, coingecko, upbit, exim, playwright_fb, molit,
-                     g2b, fiscal, kr_notice, kr_progress)
+                     g2b, fiscal, kr_notice, kr_progress,
+                     dart, ecos, naver_valuation, portfolio)
 from sources.region_codes import resolve_region
 from sources.rail_lines import resolve_line
 
@@ -397,6 +398,124 @@ async def get_rail_project_status(query: str) -> dict:
     for key, res in zip(tasks.keys(), results):
         out[key] = fail(key, res) if isinstance(res, Exception) else res
     return out
+
+
+# ------------------------------------------------ 주식 심화(DART·밸류에이션)
+
+_TTL_VALUATION = 120.0     # 재무지표는 실시간성보다 안정성
+_TTL_DISCLOSURE = 21600.0  # 공시 목록 6시간
+_TTL_MACRO = 21600.0       # 거시지표 6시간(정책금리/월간 지표)
+
+
+@mcp.tool()
+async def search_stock_code(name: str, limit: int = 10) -> dict:
+    """종목명으로 6자리 종목코드 검색(DART 상장회사 인덱스). DART_API_KEY 필요.
+
+    name: 종목명 부분일치(예: '삼성전자', '에코프로'). 완전일치를 최상위로 정렬.
+    최초 호출 시 DART 전체 상장사 목록(ZIP, 수 MB)을 받아 24시간 캐시하므로
+    첫 호출만 수 초 걸릴 수 있다.
+    반환: {query, count, items:[{name, stock_code, corp_code}], source}.
+    corp_code는 DART 고유번호(get_dart_disclosures에서 사용 가능).
+    """
+    async def fetch():
+        return await _cascade(f"종목검색:{name}",
+                              lambda: dart.search(name, limit))
+    return await cached(f"stock_search:{name}:{limit}", fetch, _TTL_DISCLOSURE)
+
+
+@mcp.tool()
+async def get_dart_disclosures(query: str, days: int = 90, rows: int = 20) -> dict:
+    """종목의 최근 DART 전자공시 목록 — 보유 종목 리스크 신호. DART_API_KEY 필요.
+
+    query: 종목명('삼성전자') / 6자리 종목코드('005930') / 8자리 DART corp_code.
+           종목명이 여러 종목과 일치하면 후보를 안내하고 실패한다(코드로 재시도).
+    days: 오늘 기준 직전 N일(기본 90). rows: 최대 건수(기본 20, 최대 100).
+    반환: {name, corp_code, stock_code, period, total_count, count,
+          disclosures:[{제목, 접수일, 제출인, 시장, 비고, 접수번호, url}], source}.
+    유상증자·전환사채·감사보고서·최대주주변경 등 제목에서 리스크 신호를 읽는다.
+    """
+    async def fetch():
+        return await _cascade(f"공시:{query}",
+                              lambda: dart.disclosures(query, days, rows))
+    return await cached(f"dart_list:{query}:{days}:{rows}", fetch, _TTL_DISCLOSURE)
+
+
+@mcp.tool()
+async def get_stock_valuation(ticker: str) -> dict:
+    """국내 종목 밸류에이션 — PER/PBR/EPS/BPS/배당수익률/시가총액(억원). 키 불필요.
+
+    ticker: 6자리 종목코드(예: '005930'). 1순위 네이버 모바일 통합 API,
+    실패 시 네이버 PC 종목페이지 정적 HTML 파싱으로 강등.
+    반환: {code, name, market_cap_eok(억원), per, pbr, eps, bps,
+          dividend_yield_pct, close_price, currency, timestamp, source}.
+    적자 기업은 per가 None일 수 있다. 시세는 get_stock_price를 함께 사용.
+    """
+    async def fetch():
+        return await _cascade(
+            f"밸류에이션:{ticker}",
+            lambda: naver_valuation.from_mobile_api(ticker),
+            lambda: naver_valuation.from_pc_html(ticker),
+        )
+    return await cached(f"valuation:{ticker}", fetch, _TTL_VALUATION)
+
+
+# ---------------------------------------------------------------- 거시경제
+
+
+@mcp.tool()
+async def get_macro_indicators(keywords: list[str] | None = None) -> dict:
+    """한국은행 ECOS 100대 통계지표 — 거시경제 스냅샷. ECOS_API_KEY 필요.
+
+    keywords: 지표명/분류명 부분일치 필터. 미지정 시 기본 관심지표
+    (기준금리/국고채/CD/콜금리/소비자물가/M2/가계신용/원달러/경제성장).
+    빈 리스트([])를 주면 100개 전체 반환.
+    반환: {name, keywords, total_available, count,
+          indicators:[{분류, 지표명, 값, 단위, 기준시점}], source}.
+    부동산(금리·가계신용)과 주식(성장·물가) 판단의 공통 기초 지표.
+    """
+    async def fetch():
+        return await _cascade("거시지표",
+                              lambda: ecos.key_statistics(keywords))
+    kw_key = ",".join(keywords) if keywords else ("_all" if keywords == [] else "_default")
+    return await cached(f"macro:{kw_key}", fetch, _TTL_MACRO)
+
+
+# ---------------------------------------------------------------- 포트폴리오
+
+
+@mcp.tool()
+async def get_portfolio_snapshot(path: str | None = None) -> dict:
+    """로컬 보유자산 파일 기반 포트폴리오 평가·손익·자산배분 스냅샷.
+
+    path: 포트폴리오 파일 경로(JSON, .yml/.yaml은 PyYAML 필요). 미지정 시
+          PORTFOLIO_FILE_PATH 환경변수 → './portfolio.json' 순. 스키마는 README 참고
+          (holdings:[{type: stock|etf|crypto|apt, ticker/region, quantity,
+           avg_price, ...}], cash:{KRW,USD}).
+    종목별 시세는 기존 tool(네이버/야후/코인게코/국토부)로 병렬 조회하며, 개별 실패는
+    해당 보유분의 price_error로만 남기고 나머지는 계속 평가한다(부분 성공).
+    USD 자산이 있으면 환율을 1회 조회해 원화 환산. apt는 최근 N개월 단지평균
+    평당가 기반 추정치(정확한 시세 아님).
+    반환: {as_of, usd_krw, holdings(평가액·손익·수익률), cash_value_krw,
+          allocation_pct(자산군별 %), totals, errors, source}.
+    """
+    try:
+        data, abspath = portfolio.load_file(path)
+    except Exception as e:  # noqa: BLE001 - 파일 문제는 안내 메시지로
+        return fail("포트폴리오", e)
+
+    fetchers = {
+        "stock": get_stock_price,
+        "etf": get_etf_price,
+        "crypto": get_crypto,
+        "apt": lambda region, ym, months: get_apt_trade_summary(region, ym, months),
+        "fx": lambda: get_exchange_rate("USD/KRW"),
+    }
+    try:
+        snap = await portfolio.snapshot(data, fetchers)
+    except Exception as e:  # noqa: BLE001
+        return fail("포트폴리오", e)
+    snap["file"] = abspath
+    return snap
 
 
 # ---------------------------------------------------------------- 스냅샷

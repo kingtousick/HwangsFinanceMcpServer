@@ -22,6 +22,11 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_rail_notices(query, kind="기본")` | 국가철도공단 관보고시(고시·인허가) | `"7호선 청라연장"` |
 | `get_rail_progress(query)` | 국가철도공단 공정률(진행현황, Playwright) | `"GTX-A"` |
 | `get_rail_project_status(query)` | 한 노선의 예산·발주·고시·공정률 통합 스냅샷 | `"GTX-A"` |
+| `search_stock_code(name)` | 종목명→6자리 코드 검색(DART 상장사 인덱스) | `"삼성전자"` |
+| `get_dart_disclosures(query, days=90)` | 최근 DART 전자공시(리스크 신호) | `"005930"`, `"에코프로"` |
+| `get_stock_valuation(ticker)` | PER/PBR/EPS/BPS/배당수익률/시가총액 | `"005930"` |
+| `get_macro_indicators(keywords=None)` | 한은 ECOS 100대 통계지표(금리·물가·M2 등) | `["기준금리","가계신용"]` |
+| `get_portfolio_snapshot(path=None)` | 로컬 파일 기반 보유자산 평가·손익·배분 | `"./portfolio.json"` |
 
 ### 티커 형식
 - **국내 주식/ETF**: 6자리 코드 (`005930`, `381180`) → 네이버 polling
@@ -84,6 +89,11 @@ py -m venv .venv
 - `EXIM_API_KEY`: 한국수출입은행 환율 API(가정용 PC 환율 폴백).
 - `FINNHUB_KEY`: 미국 주식 폴백(예약, 현재 미사용).
 - `MOLIT_API_KEY`: 국토교통부 실거래가 API(`get_apt_trade`/`get_apt_rent`에 필수).
+- `DART_API_KEY`: DART 전자공시(`search_stock_code`/`get_dart_disclosures`에 필수).
+  [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 발급.
+- `ECOS_API_KEY`: 한국은행 ECOS(`get_macro_indicators`에 필수).
+  [ecos.bok.or.kr](https://ecos.bok.or.kr) > Open API에서 무료 발급.
+- `PORTFOLIO_FILE_PATH`: 포트폴리오 파일 경로(선택, 기본 `./portfolio.json`).
 
 ### 부동산 실거래가 사용법
 1. [공공데이터포털](https://www.data.go.kr)에서 **"국토교통부_아파트 매매 실거래가 자료"**,
@@ -171,6 +181,44 @@ get_rail_project_status("GTX-A")               # 4개 통합(일부 실패해도
 >   TLS MITM으로 막히므로 `channel="msedge"`(시스템 Edge)로 폴백 — `pip install playwright`만
 >   하면 되고 `playwright install`은 불필요. 페이지 구조 변경 시 깨질 수 있음(미설치·실패 시
 >   `{error}`, 서버 크래시 없음). 참고: 페이지 표기는 "수도권 광역급행철도 B/C노선"(GTX 문자 없음).
+
+### 포트폴리오 점검 도구 사용법
+
+**주식 심화**: `search_stock_code`로 이름→코드를 찾고, `get_stock_valuation`(밸류에이션,
+키 불필요·네이버)과 `get_dart_disclosures`(공시 리스크: 유상증자·CB·감사보고서·최대주주변경
+등)를 함께 본다. DART 상장사 인덱스는 최초 호출 시 전체 목록(ZIP, 수 MB)을 받아 24시간
+캐시하므로 **첫 호출만 수 초** 걸린다.
+
+**거시경제**: `get_macro_indicators()`는 ECOS **100대 통계지표**를 키워드로 필터한다
+(기본: 기준금리/국고채/CD/콜금리/소비자물가/M2/가계신용/원달러/경제성장). `keywords=[]`로
+전체 100개를 볼 수 있다. ⚠️ ECOS 응답 필드명(`KEYSTAT_NAME` 등)은 문서 기준 구현이므로
+첫 실호출에서 확인 필요.
+
+**포트폴리오 스냅샷** (`get_portfolio_snapshot`): 계좌 연동 없이 로컬 파일로 보유자산을
+정의하면 기존 시세 Tool들로 병렬 평가해 손익·자산배분을 계산한다.
+
+`portfolio.json` 예시(**개인 자산 정보 — 커밋 금지**, .gitignore 등록됨):
+```json
+{
+  "base_currency": "KRW",
+  "holdings": [
+    {"type": "stock",  "ticker": "005930", "quantity": 10, "avg_price": 68000},
+    {"type": "stock",  "ticker": "AAPL",   "quantity": 3,  "avg_price": 180},
+    {"type": "etf",    "ticker": "381180", "quantity": 5,  "avg_price": 15200},
+    {"type": "crypto", "ticker": "BTC", "quote": "KRW", "quantity": 0.05, "avg_price": 92000000},
+    {"type": "apt", "region": "강남구", "complex": "래미안", "quantity": 1,
+     "avg_price": 250000, "pyeong": 25, "months": 6}
+  ],
+  "cash": {"KRW": 5000000, "USD": 1000}
+}
+```
+- `avg_price` 단위: 주식/ETF/크립토는 **거래 통화 기준 1단위 가격**(미국 주식은 USD —
+  환율은 자동으로 1회 조회해 원화 환산), `apt`는 **만원 단위 호당 총 매입가**.
+- `apt` 평가는 `get_apt_trade_summary`의 최근 N개월(기본 6) 단지평균 평당가 × `pyeong`
+  기반 **추정치**다. `complex`는 실거래 단지명 부분일치로 매칭된다.
+- 개별 종목 시세 실패는 해당 보유분 `price_error`로만 남고 나머지는 계속 평가된다
+  (`errors` 배열과 총계 제외로 확인).
+- YAML(`.yml`/`.yaml`)로 쓰려면 `pip install pyyaml`.
 
 ## 비기능
 - 메모리 TTL 캐시 30초(동일 키 중복 호출 방지). 공사현황은 길게(입찰 30분/고시·공정률 6시간/예산 1일)

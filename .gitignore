@@ -3,3 +3,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+# 개인 자산 정보(get_portfolio_snapshot 입력) — 커밋 금지
+portfolio.json
+portfolio.yaml
+portfolio.yml

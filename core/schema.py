@@ -14,15 +14,24 @@ from datetime import datetime, timezone, timedelta
 KST = timezone(timedelta(hours=9))
 
 # 에러 메시지에 섞여 나오는 API 키를 마스킹.
-# data.go.kr(serviceKey), 수출입은행(authkey), 열린재정(Key/apiKey) 등 파라미터명 변형 포괄.
+# data.go.kr(serviceKey), 수출입은행(authkey), 열린재정(Key/apiKey), DART(crtfc_key) 등
+# 파라미터명 변형 포괄.
 _SECRET_RE = re.compile(
     r"(serviceKey|service_key|authkey|auth_key|apiKey|api_key|Key)=[^&\s'\"]+",
     re.IGNORECASE,
 )
 
+# 한국은행 ECOS는 인증키가 쿼리가 아니라 URL 경로에 들어간다
+# (ecos.bok.or.kr/api/KeyStatisticList/{키}/json/...). httpx 예외 메시지에 URL이
+# 그대로 실리므로 경로 세그먼트도 마스킹한다.
+_PATH_KEY_RE = re.compile(
+    r"(ecos\.bok\.or\.kr/api/\w+/)[^/\s'\"]+",
+    re.IGNORECASE,
+)
+
 
 def _scrub(s: str) -> str:
-    return _SECRET_RE.sub(r"\1=***", s)
+    return _PATH_KEY_RE.sub(r"\1***", _SECRET_RE.sub(r"\1=***", s))
 
 
 def to_float(v) -> float | None:

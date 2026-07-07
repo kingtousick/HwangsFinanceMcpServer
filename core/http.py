@@ -88,6 +88,31 @@ async def get_json(url: str, *, params: dict | None = None,
     raise last_exc  # type: ignore[misc]
 
 
+async def get_bytes(url: str, *, params: dict | None = None,
+                    headers: dict | None = None, retries: int = 1,
+                    timeout: float | None = None) -> bytes:
+    """GET 후 바이너리 본문 반환(ZIP 등 파일 응답 API용). retries회 재시도, 최종 실패 시 예외.
+
+    timeout: 이 호출만 별도 타임아웃(초). 대용량 파일 다운로드용(미지정 시 기본 5초).
+    """
+    client = get_client()
+    last_exc: Exception | None = None
+    kw = {} if timeout is None else {"timeout": timeout}
+    for attempt in range(retries + 1):
+        t0 = time.perf_counter()
+        try:
+            r = await client.get(url, params=params, headers=headers, **kw)
+            r.raise_for_status()
+            logger.info("GET ok url=%s attempt=%d %.0fms %dB",
+                        url, attempt, (time.perf_counter() - t0) * 1000, len(r.content))
+            return r.content
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            logger.warning("GET fail url=%s attempt=%d %.0fms err=%s",
+                           url, attempt, (time.perf_counter() - t0) * 1000, e)
+    raise last_exc  # type: ignore[misc]
+
+
 async def get_text(url: str, *, params: dict | None = None,
                    headers: dict | None = None, retries: int = 1) -> str:
     """GET 후 본문 텍스트 반환(XML 응답 API용). retries회 재시도, 최종 실패 시 예외."""
