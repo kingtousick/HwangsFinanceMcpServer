@@ -15,11 +15,12 @@ data.go.kr 데이터셋(국가철도공단 관보고시 기본정보 15114027 �
   - 국가철도공단_기본계획 고시       (kind='계획')
   - 국가철도공단_관보고시 세목정보   (kind='세목')
 
---- needs-verification ---------------------------------------------------------
+--------------------------------------------------------------------------------
 데이터셋의 'OpenAPI/미리보기' 탭에서 보이는 **odcloud.kr 엔드포인트 URL(uddi 포함)**을
-환경변수로 주입한다(키 없이 URL만 — serviceKey는 코드가 첨부):
-  KRNA_NOTICE_URL_BASIC  : 관보고시 기본정보 엔드포인트 URL  (kind='기본')
-  KRNA_NOTICE_URL_PLAN   : 기본계획 고시 엔드포인트 URL      (kind='계획')
+환경변수로 주입한다(키 없이 URL만 — serviceKey는 코드가 첨부). 데이터셋마다 data.go.kr
+'활용신청' 승인이 필요하다(미승인 시 401):
+  KRNA_NOTICE_URL_BASIC  : 관보고시 기본정보 엔드포인트 URL  (kind='기본')  [실호출 검증됨]
+  KRNA_NOTICE_URL_PLAN   : 기본계획 고시(15139820) 엔드포인트 (kind='계획')  [실호출 검증됨]
   KRNA_NOTICE_URL_DETAIL : 관보고시 세목정보 엔드포인트 URL  (kind='세목')
 """
 from __future__ import annotations
@@ -35,17 +36,20 @@ _KIND_ENV = {
     "세목": "KRNA_NOTICE_URL_DETAIL",
 }
 
-# 레코드 필드명 후보(파일 컬럼 표기 차이 흡수). 실측(15114027 기본정보)은 컬럼이
-# '고시명/관보고시번호/고시일자/고시기관명/고시 내용/사업시작일자/사업종료일자'.
-_F_TITLE = ("고시명", "고시제목", "NOTICE_NM", "GOSI_NM", "TITLE")
+# 레코드 필드명 후보(파일 컬럼 표기 차이 흡수). 실측:
+#  - 기본정보(15114027): '고시명/관보고시번호/고시일자/고시기관명/고시 내용/사업시작일자/사업종료일자'
+#  - 기본계획(15139820): '노선명/관보고시번호/고시기관명/사업구간/사업내용/고시 공사기간/연장/비고'
+#    (고시일자 컬럼이 없고 제목 역할을 '노선명'이 함. 기간은 '2008~2014' 형태로 합쳐져 있음)
+_F_TITLE = ("고시명", "고시제목", "노선명", "NOTICE_NM", "GOSI_NM", "TITLE")
 _F_NO = ("관보고시번호", "고시번호", "NOTICE_NO", "GOSI_NO")
 _F_DATE = ("고시일자", "고시일", "관보게재일", "NOTICE_DE", "GOSI_DT", "PUBLIC_DE")
 _F_PROJECT = ("사업명", "노선명", "PROJECT_NM", "BIZ_NM", "LINE_NM")
 _F_TYPE = ("고시구분", "고시종류", "NOTICE_SE", "GOSI_SE", "구분")
 _F_AGENCY = ("고시기관명", "고시기관", "발주기관", "AGENCY_NM")
-_F_CONTENT = ("고시 내용", "고시내용", "NOTICE_CN", "CONTENT")
+_F_CONTENT = ("고시 내용", "고시내용", "사업내용", "사업구간", "NOTICE_CN", "CONTENT")
 _F_BGN = ("사업시작일자", "사업개시일자", "BIZ_BGN_DE")
 _F_END = ("사업종료일자", "사업완료일자", "BIZ_END_DE")
+_F_PERIOD = ("고시 공사기간", "공사기간", "사업기간")   # 시작~종료가 한 컬럼에 합쳐진 경우
 
 # 고시명에 명시적 '고시구분' 컬럼이 없으므로 제목 텍스트에서 단계를 파생한다.
 # 앞쪽일수록 우선(더 구체적인 표현부터 매칭).
@@ -105,6 +109,9 @@ def _period(r: dict) -> str | None:
     bgn, end = _first(r, _F_BGN), _first(r, _F_END)
     if bgn or end:
         return f"{bgn or '?'}~{end or '?'}"
+    combined = _first(r, _F_PERIOD)   # '2008~ 2014'처럼 한 컬럼에 합쳐진 경우
+    if combined:
+        return " ".join(str(combined).split())   # 내부 공백 정규화
     return None
 
 
