@@ -25,6 +25,7 @@ data.go.kr 데이터셋(국가철도공단 관보고시 기본정보 15114027 �
 """
 from __future__ import annotations
 
+import asyncio
 import os
 
 from core import http
@@ -133,11 +134,104 @@ def _matches(r: dict, keywords: list[str]) -> bool:
     return any(kw in blob for kw in keywords)
 
 
+# 세목(용지) 데이터셋(15114051) 필드. 노선/사업명 없이 지번 단위 토지 편입 내역이라
+# 노선 키워드로는 못 잡고, 오직 '관보고시번호'로 특정 고시에 딸린 필지를 조인한다.
+_F_AREA = ("편입면적", "당초면적", "AREA")
+_F_JIBUN = ("편입지번", "당초지번", "지번", "JIBUN")
+_F_REGION = ("지역본부", "관할기관", "REGION")
+_F_DIV = ("구분코드", "구분", "DIV")
+
+# 세목은 필지 수가 고시당 수천 건까지 가므로 페이지네이션 상한을 둔다(안전장치).
+_DETAIL_PER_PAGE = 1000
+_DETAIL_MAX_PAGES = 20   # 최대 2만 필지까지 집계(초과 시 truncated 표시)
+
+
+async def _detail_summary(gosi_no: str) -> dict:
+    """관보고시번호로 용지 세목(필지) 조회 → 필지수/총편입면적/지역본부/구분 요약.
+
+    odcloud 서버측 필터 cond[관보고시번호::EQ]로 해당 고시 필지만 받는다(전체 479k 스캔 회피).
+    totalCount는 필터를 무시하고 데이터셋 전체를 반환하므로, 페이지 rows 수로 종료를 판단한다.
+    """
+    url = _url("세목")
+    parcels: list[dict] = []
+    truncated = False
+    for page in range(1, _DETAIL_MAX_PAGES + 1):
+        p = await http.get_json(url, params={
+            "serviceKey": data_go_key(), "page": str(page), "perPage": str(_DETAIL_PER_PAGE),
+            "cond[관보고시번호::EQ]": gosi_no,
+        }, retries=1)
+        rows = _records(p)
+        parcels.extend(rows)
+        if len(rows) < _DETAIL_PER_PAGE:
+            break
+        if page == _DETAIL_MAX_PAGES:
+            truncated = True
+    if not parcels:
+        return {"필지수": 0}
+
+    def _num(v):
+        try:
+            return float(str(v).replace(",", ""))
+        except (TypeError, ValueError):
+            return 0.0
+
+    total_area = sum(_num(_first(r, _F_AREA)) for r in parcels)
+    regions = sorted({str(_first(r, _F_REGION)) for r in parcels if _first(r, _F_REGION)})
+    divs: dict[str, int] = {}
+    for r in parcels:
+        d = _first(r, _F_DIV)
+        if d is not None:
+            divs[str(d)] = divs.get(str(d), 0) + 1
+    return {
+        "필지수": len(parcels),
+        "총편입면적_㎡": round(total_area, 3),
+        "지역본부": regions,
+        "구분": divs,
+        "truncated": truncated,
+    }
+
+
+async def _search_land(keywords: list[str]) -> dict:
+    """세목 드릴다운: 노선 키워드로 기본정보 고시를 찾은 뒤, 각 고시번호의 용지 세목을 붙인다.
+
+    세목 데이터엔 노선명이 없어 키워드 검색이 불가능하므로 '기본' 고시를 경유해 관보고시번호로 조인.
+    용지 세목이 실제로 붙은 고시(주로 실시계획 승인)만 남긴다.
+    """
+    base = await search_notices(keywords, "기본")
+    notices = base["notices"]
+
+    async def enrich(n: dict) -> dict | None:
+        no = n.get("고시번호")
+        if not no:
+            return None
+        summary = await _detail_summary(str(no))
+        if summary.get("필지수", 0) == 0:
+            return None
+        return {**n, "용지세목": summary}
+
+    enriched = await asyncio.gather(*(enrich(n) for n in notices))
+    hits = [e for e in enriched if e]
+    hits.sort(key=lambda n: n["용지세목"]["필지수"], reverse=True)
+    return {
+        "name": "국가철도공단 관보고시 용지세목",
+        "kind": "세목",
+        "keywords": keywords,
+        "total_records": base["total_records"],
+        "count": len(hits),
+        "notices": hits,
+        "source": "krna_notice",
+    }
+
+
 async def search_notices(keywords: list[str], kind: str = "기본") -> dict:
     """관보고시 파일을 받아 키워드(노선/사업명)로 필터링.
 
-    kind: '기본'(관보고시 기본정보)/'계획'(기본계획 고시)/'세목'(세목정보).
+    kind: '기본'(관보고시 기본정보)/'계획'(기본계획 고시)/'세목'(용지 세목).
+    '세목'은 지번 단위 토지 편입 내역이라 노선 키워드로 직접 못 잡는다 → '기본' 고시를 경유해
+    관보고시번호로 조인하고, 각 고시에 딸린 필지수·총편입면적을 요약해 붙인다(드릴다운).
     """
+    if kind == "세목":
+        return await _search_land(keywords)
     url = _url(kind)
     # odcloud.kr 자동변환 API는 serviceKey + page/perPage 파라미터가 필요.
     if "odcloud.kr" in url or "/api/" in url:

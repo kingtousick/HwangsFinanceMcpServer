@@ -337,9 +337,11 @@ async def get_rail_notices(query: str, kind: str = "기본") -> dict:
     파일 다운로드 URL 환경변수 필요(KRNA_NOTICE_URL_BASIC 등, sources/kr_notice.py 참고).
 
     query: 노선 프리셋 별칭 또는 사업명 키워드. kind: '기본'(관보고시 기본정보)/
-           '계획'(기본계획 고시)/'세목'(관보고시 세목정보).
+           '계획'(기본계획 고시)/'세목'(용지 세목 — 지번별 토지 편입 내역).
     반환: {name, kind, keywords, total_records, count, notices:[{고시명, 고시번호,
           고시일, 사업명, 종류}], source}. 기본계획/실시계획 고시는 법적 확정 신호.
+    '세목'은 노선 고시를 경유해 각 고시번호에 딸린 필지를 조인, notices에 용지세목
+    {필지수, 총편입면적_㎡, 지역본부, 구분}을 붙인다(수용 대상 토지 = 부동산 직접 신호).
     """
     line = resolve_line(query)
     # 고시 원문은 사업 구간명 표기라 대중 노선명과 다르다(GTX-A→'삼성~동탄 광역급행철도').

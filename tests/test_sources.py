@@ -14,6 +14,7 @@ import respx
 
 import finance_server as srv
 from core import cache, http
+from sources import kr_notice
 
 NAVER_KOSPI = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI"
 YAHOO_GSPC = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
@@ -621,3 +622,48 @@ async def test_snapshot_returns_eight():
     res = await srv.get_market_snapshot()
     assert res["count"] == 8
     assert len(res["snapshot"]) == 8
+
+
+_KRNA_BASIC_URL = "https://api.odcloud.kr/api/15114027/v1/uddi:test-basic"
+_KRNA_DETAIL_URL = "https://api.odcloud.kr/api/15114051/v1/uddi:test-detail"
+
+
+@respx.mock
+async def test_rail_notice_land_detail_drilldown(monkeypatch):
+    """세목(kind='세목')은 기본 고시를 경유해 관보고시번호로 용지 필지를 조인한다.
+
+    - 세목 데이터엔 노선명이 없어 키워드 검색 불가 → '기본' 고시 번호로 서버측 cond 필터.
+    - 용지 세목이 붙은 고시만 남기고, 필지수·총편입면적 요약을 붙인다.
+    """
+    monkeypatch.setenv("DATA_GO_KR_API_KEY", "dummy-key")
+    monkeypatch.setenv("KRNA_NOTICE_URL_BASIC", _KRNA_BASIC_URL)
+    monkeypatch.setenv("KRNA_NOTICE_URL_DETAIL", _KRNA_DETAIL_URL)
+
+    # 기본 고시 2건: 실시계획(필지 있음) + 기본계획(필지 없음)
+    respx.get(_KRNA_BASIC_URL).mock(return_value=httpx.Response(200, json={"data": [
+        {"고시명": "삼성-동탄 광역급행철도 실시계획 변경 승인", "관보고시번호": "2018-214",
+         "고시일자": "2018-05-01", "고시기관명": "국토교통부"},
+        {"고시명": "수도권고속철도 기본계획", "관보고시번호": "2013-793",
+         "고시일자": "2013-08-01", "고시기관명": "국토교통부"},
+    ], "totalCount": 2}))
+
+    def _detail(request):
+        no = request.url.params.get("cond[관보고시번호::EQ]")
+        if no == "2018-214":
+            parcel = {"관보고시번호": "2018-214", "구분코드": "토지",
+                      "편입면적": "100.5", "편입지번": "538-2", "지역본부": "수도권본부"}
+            return httpx.Response(200, json={"data": [parcel, parcel], "totalCount": 479614})
+        return httpx.Response(200, json={"data": [], "totalCount": 479614})
+
+    respx.get(_KRNA_DETAIL_URL).mock(side_effect=_detail)
+
+    res = await kr_notice.search_notices(["광역급행철도"], "세목")
+    assert res["kind"] == "세목"
+    assert res["count"] == 1                        # 필지 있는 실시계획만 남음
+    hit = res["notices"][0]
+    assert hit["고시번호"] == "2018-214"
+    s = hit["용지세목"]
+    assert s["필지수"] == 2
+    assert s["총편입면적_㎡"] == pytest.approx(201.0)
+    assert s["지역본부"] == ["수도권본부"]
+    assert s["구분"] == {"토지": 2}
