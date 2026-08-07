@@ -13,6 +13,7 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_etf_price(code)` | KRX ETF | `"381180"` |
 | `get_crypto(symbol="BTC", quote="KRW")` | 크립토 | `"BTC"/"KRW"`, `"ETH"/"USD"` |
 | `get_market_snapshot()` | 8개 핵심 지표 일괄(리포트용) | — |
+| `get_price_history(ticker, period="1y", interval=None)` | 과거 시세 시계열 + 수익률·MDD·변동성 | `"005930"`, `"^GSPC"`, `"BTC-USD"` |
 | `get_apt_trade(region, deal_ym)` | 아파트 매매 실거래가(평수·평당가 포함) | `"강남구"`, `"2024-06"` |
 | `get_apt_trade_summary(region, deal_ym, months=1)` | 단지별 평균 평당가 집계 | `"강남구"`, `"2024-06"`, `6` |
 | `get_apt_rent(region, deal_ym)` | 아파트 전월세 실거래가 | `"강남구"`, `"2024-06"` |
@@ -29,6 +30,8 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_dart_disclosures(query, days=90)` | 최근 DART 전자공시(리스크 신호) | `"005930"`, `"에코프로"` |
 | `get_stock_valuation(ticker)` | PER/PBR/EPS/BPS/배당수익률/시가총액 | `"005930"` |
 | `get_macro_indicators(keywords=None)` | 한은 ECOS 100대 통계지표(금리·물가·M2 등) | `["기준금리","가계신용"]` |
+| `get_macro_series(indicator, periods=36)` | 거시지표 **시계열**(추이·변화율) | `"기준금리"`, `"국고채3년"` |
+| `get_realty_price_index(region, kind, house_type, months, source)` | 주택 매매/전세 **가격지수 시계열** | `"서울"`, `"매매"`, `"아파트"` |
 | `get_portfolio_snapshot(path=None)` | 로컬 파일 기반 보유자산 평가·손익·배분 | `"./portfolio.json"` |
 
 ### 티커 형식
@@ -94,8 +97,9 @@ py -m venv .venv
 - `MOLIT_API_KEY`: 국토교통부 실거래가 API(`get_apt_trade`/`get_apt_rent`에 필수).
 - `DART_API_KEY`: DART 전자공시(`search_stock_code`/`get_dart_disclosures`에 필수).
   [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 발급.
-- `ECOS_API_KEY`: 한국은행 ECOS(`get_macro_indicators`에 필수).
-  [ecos.bok.or.kr](https://ecos.bok.or.kr) > Open API에서 무료 발급.
+- `ECOS_API_KEY`: 한국은행 ECOS(`get_macro_indicators`/`get_macro_series`/
+  `get_realty_price_index`에 필수). [ecos.bok.or.kr](https://ecos.bok.or.kr) >
+  Open API에서 무료 발급.
 - `PORTFOLIO_FILE_PATH`: 포트폴리오 파일 경로(선택, 기본 `./portfolio.json`).
 
 ### 부동산 실거래가 사용법
@@ -186,6 +190,43 @@ get_rail_project_status("GTX-A")               # 4개 통합(일부 실패해도
 >   TLS MITM으로 막히므로 `channel="msedge"`(시스템 Edge)로 폴백 — `pip install playwright`만
 >   하면 되고 `playwright install`은 불필요. 페이지 구조 변경 시 깨질 수 있음(미설치·실패 시
 >   `{error}`, 서버 크래시 없음). 참고: 페이지 표기는 "수도권 광역급행철도 B/C노선"(GTX 문자 없음).
+
+### 시계열 도구 사용법
+스냅샷(현재가)만으로는 "올랐나/빠졌나"를 못 본다. 아래 3개는 **추이**를 준다.
+
+```python
+get_price_history("005930", "1y")            # 국내 주식 1년 주봉 + 수익률/MDD/변동성
+get_price_history("^GSPC", "6mo")            # 해외 지수
+get_price_history("KRW=X", "1y")             # 환율도 같은 tool
+get_price_history("BTC-USD", "1y")           # 크립토는 야후 심볼로
+get_macro_series("기준금리", 36)              # 최근 36개월 기준금리 추이
+get_realty_price_index("서울", "매매", "아파트")  # 서울 아파트 매매가격지수 추이
+```
+
+**`get_price_history`** — 국내 6자리 코드는 네이버 일별시세(외국인소진율 포함),
+그 외는 Yahoo chart. 네이버 실패 시 Yahoo `.KS`→`.KQ`로 강등한다. `period`는
+`5d/1mo/3mo/6mo/ytd/1y/2y/5y/10y/max`, `interval`은 `1d/1wk/1mo`이며 미지정 시
+period에 맞춰 자동 선택해 **관측 수를 50~120점으로 유지**한다(1y→주봉). `stats`에
+기간수익률·최고/최저·고점대비(%)·최대낙폭(MDD)·연율화 변동성이 들어온다.
+현재가만 필요하면 응답이 훨씬 짧은 `get_stock_price`를 쓴다.
+
+**`get_macro_series`** — 프리셋: `기준금리`, `콜금리`, `CD금리`, `국고채3년`,
+`국고채10년`, `소비자물가`, `M2`, `가계신용`. 프리셋에 없으면
+`"통계표코드/항목코드/주기"`(예: `"722Y001/0101000/M"`)로 직접 지정한다.
+반환에 `changes`(절대 변화)와 `changes_pct`(변화율)가 **둘 다** 들어온다 —
+금리는 `changes`(%p)로 읽어야 한다(기준금리 2.50→2.75는 "+10%"가 아니라 "+0.25%p").
+
+**`get_realty_price_index`** — 실거래가는 단지·평형 편차가 커서 시장 방향을 보기
+어렵다. 지수와 함께 봐야 해석이 된다.
+
+| source | 통계표 | 지역 | 최신성 | 기준월 |
+|---|---|---|---|---|
+| `부동산원`(기본) | 901Y113(매매)/901Y114(전세) | 시도 24개 | 공표 지연(수개월) | 2025.03=100 |
+| `kb` | 901Y062/901Y063 | 전국·서울만 | 빠름 | 2026.01=100 |
+
+> 기준월·표본이 달라 **두 지수의 수치를 직접 비교하면 안 된다**(변화율로 비교).
+> 시군구(강남구 등) 단위 지수는 ECOS에 없다 — `get_apt_trade_summary`(실거래)를 쓴다.
+> 부동산원 통계표는 유형→지역 **2차원**이라 순서가 바뀌면 빈 결과(INFO-200)가 된다.
 
 ### 포트폴리오 점검 도구 사용법
 

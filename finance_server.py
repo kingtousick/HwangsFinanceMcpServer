@@ -24,7 +24,7 @@ from core.cache import cached
 from core.schema import fail
 from sources import (naver, yahoo, coingecko, upbit, exim, playwright_fb, molit,
                      g2b, fiscal, kr_notice, kr_progress,
-                     dart, ecos, naver_valuation, portfolio)
+                     dart, ecos, naver_valuation, portfolio, realty_index)
 from sources.region_codes import resolve_region
 from sources.rail_lines import resolve_line
 
@@ -137,6 +137,48 @@ async def get_etf_price(code: str) -> dict:
     async def fetch():
         return await _cascade(code, lambda: naver.get_stock(code))
     return await cached(f"etf:{code}", fetch)
+
+
+# ---------------------------------------------------------------- 시계열
+
+_TTL_HISTORY = 300.0  # 일/주/월봉은 장중에도 자주 안 바뀜
+
+
+@mcp.tool()
+async def get_price_history(ticker: str, period: str = "1y",
+                            interval: str | None = None) -> dict:
+    """주식·지수·환율의 과거 시세 시계열 + 수익률/변동성/MDD. 키 불필요.
+
+    ticker: 국내 6자리 코드('005930') → 네이버 일별시세, 실패 시 Yahoo(.KS/.KQ) 강등.
+            Yahoo 심볼('^GSPC', 'AAPL', 'KRW=X') → Yahoo chart.
+            크립토도 Yahoo 심볼로 조회 가능('BTC-USD', 'ETH-USD').
+    period: '5d','1mo','3mo','6mo','ytd','1y','2y','5y','10y','max'(기본 '1y').
+    interval: '1d'(일봉)/'1wk'(주봉)/'1mo'(월봉). 미지정 시 period에 맞춰 자동
+              선택(1y→주봉 등)해 관측 수를 50~120점으로 유지한다.
+    반환: {name, symbol, period, interval, currency, count,
+          points:[{date, open, high, low, close, volume}],
+          stats:{start_value, end_value, change_pct(기간수익률),
+                 high/low(+시점), pct_from_high, max_drawdown_pct,
+                 volatility_pct(연율화)}, week52_high/low(야후), source}.
+    국내 종목은 points에 foreign_ratio(외국인소진율)가 함께 온다.
+    현재가만 필요하면 get_stock_price를 쓴다(응답이 훨씬 짧다).
+    """
+    is_domestic = ticker.isdigit() and len(ticker) == 6
+    iv = interval or yahoo.auto_interval(period)
+
+    async def fetch():
+        if is_domestic:
+            return await _cascade(
+                f"시계열:{ticker}",
+                lambda: naver.get_history(ticker, period, iv),
+                lambda: yahoo.get_history(f"{ticker}.KS", period, iv, name=ticker),
+                lambda: yahoo.get_history(f"{ticker}.KQ", period, iv, name=ticker),
+            )
+        return await _cascade(
+            f"시계열:{ticker}",
+            lambda: yahoo.get_history(ticker, period, iv),
+        )
+    return await cached(f"hist:{ticker}:{period}:{iv}", fetch, _TTL_HISTORY)
 
 
 # ---------------------------------------------------------------- 크립토
@@ -560,6 +602,59 @@ async def get_macro_indicators(keywords: list[str] | None = None) -> dict:
                               lambda: ecos.key_statistics(keywords))
     kw_key = ",".join(keywords) if keywords else ("_all" if keywords == [] else "_default")
     return await cached(f"macro:{kw_key}", fetch, _TTL_MACRO)
+
+
+@mcp.tool()
+async def get_macro_series(indicator: str = "기준금리", periods: int = 36) -> dict:
+    """거시지표 **시계열**(한국은행 ECOS 통계표). ECOS_API_KEY 필요.
+
+    indicator: 프리셋 이름 — '기준금리', '콜금리', 'CD금리', '국고채3년',
+               '국고채10년', '소비자물가', 'M2', '가계신용'.
+               프리셋에 없으면 '통계표코드/항목코드/주기'로 직접 지정
+               (예: '722Y001/0101000/M'). 주기는 M(월)/Q(분기)/D(일)/A(년).
+    periods: 조회할 관측 수(월 계열이면 개월 수, 기본 36).
+    반환: {name, stat_code, item_code, cycle, unit, count,
+          points:[{time, value}], stats:{start_value, end_value, change,
+          change_pct, high/low(+시점)}, changes/changes_pct:{'3개월','6개월','12개월'},
+          source}.
+    금리(연%)는 changes(절대 %p)로, 지수·잔액은 changes_pct(%)로 읽는다
+    (기준금리 2.50→2.75는 '+10%'가 아니라 '+0.25%p').
+    최신값 여러 개를 한눈에 보려면 get_macro_indicators(스냅샷)를 쓴다.
+    """
+    async def fetch():
+        return await _cascade(f"거시시계열:{indicator}",
+                              lambda: ecos.series(indicator, periods))
+    return await cached(f"macro_series:{indicator}:{periods}", fetch, _TTL_MACRO)
+
+
+@mcp.tool()
+async def get_realty_price_index(region: str = "전국", kind: str = "매매",
+                                 house_type: str = "아파트", months: int = 36,
+                                 source: str = "부동산원") -> dict:
+    """주택 매매·전세 **가격지수 시계열**(ECOS 중계). ECOS_API_KEY 필요.
+
+    실거래가(get_apt_trade_summary)는 단지·평형 편차가 커서 시장 방향을 보기
+    어렵다. 지수와 함께 봐야 해석이 된다.
+
+    region: 시도 단위 — '전국','수도권','지방','서울','경기','인천','부산',
+            '대구','광주','대전','울산','세종','강원','충북','충남','전북',
+            '전남','경북','경남','제주','5대광역시','6대광역시','8개도','9개도'.
+            **시군구(강남구 등)는 지수가 없다** — 실거래 tool을 쓴다.
+    kind: '매매'(기본) 또는 '전세'. house_type: '아파트'(기본)/'종합'/
+          '연립다세대'/'단독주택'.
+    source: '부동산원'(기본, 지역 세분·공표 지연 있음) 또는 'kb'(전국·서울만,
+            최신월 반영이 빠름). 기준월이 달라 두 지수의 수치를 직접 비교하면 안 된다.
+    반환: {name, region, kind, house_type, org, unit(기준월=100), count,
+          points:[{time, value}], stats, changes/changes_pct:{'3개월','6개월','12개월'},
+          note, source}.
+    """
+    async def fetch():
+        return await _cascade(
+            f"주택가격지수:{region}:{kind}",
+            lambda: realty_index.price_index(region, kind, house_type, months, source),
+        )
+    key = f"realty_idx:{region}:{kind}:{house_type}:{months}:{source}"
+    return await cached(key, fetch, _TTL_MACRO)
 
 
 # ---------------------------------------------------------------- 포트폴리오
