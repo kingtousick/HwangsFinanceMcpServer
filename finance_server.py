@@ -37,6 +37,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("finance-mcp")
 
+# httpx INFO 로그는 요청 URL 전체(API 키 포함)를 stderr에 남기므로 억제
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 mcp = FastMCP("finance")
 
 
