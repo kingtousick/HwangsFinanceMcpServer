@@ -82,8 +82,8 @@ py -m venv .venv
 {
   "mcpServers": {
     "finance": {
-      "command": "C:\\Chamomile\\workspace\\agentHwang\\finaceMcp\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Chamomile\\workspace\\agentHwang\\finaceMcp\\finance_server.py"],
+      "command": "C:\\{project}\\workspace\\agentHwang\\finaceMcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\{project}\\workspace\\agentHwang\\finaceMcp\\finance_server.py"],
       "env": { "EXIM_API_KEY": "", "FINNHUB_KEY": "" }
     }
   }
