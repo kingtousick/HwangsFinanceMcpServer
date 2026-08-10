@@ -13,6 +13,13 @@ from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
 
+# data_kind: 값이 어느 시점의 것인지. 미국 밸류에이션/SEC/FRED 툴이 사용한다.
+# (기존 국내 툴은 ok() 빌더를 쓰며 이 필드를 넣지 않는다 — 응답 크기 유지)
+REALTIME = "realtime"        # 실시간 체결가
+INTRADAY = "intraday"        # 장중 지연 시세
+PREV_CLOSE = "prev_close"    # 전일 종가 기준
+FILING = "filing"            # 공시 원문 기준
+
 # 에러 메시지에 섞여 나오는 API 키를 마스킹.
 # data.go.kr(serviceKey), 수출입은행(authkey), 열린재정(Key/apiKey), DART(crtfc_key) 등
 # 파라미터명 변형 포괄.
@@ -32,6 +39,19 @@ _PATH_KEY_RE = re.compile(
 
 def _scrub(s: str) -> str:
     return _PATH_KEY_RE.sub(r"\1***", _SECRET_RE.sub(r"\1=***", s))
+
+
+def _reason(err) -> str:
+    """예외/문자열을 사람이 읽을 수 있는 사유 문자열로.
+
+    httpx.ReadTimeout·ReadError 등 네트워크 예외는 str()이 빈 문자열이라
+    그대로 쓰면 "reason": "" 가 되어 아무 정보도 주지 못한다. 이럴 때는
+    예외 클래스명이라도 남긴다.
+    """
+    s = str(err).strip()
+    if not s and isinstance(err, BaseException):
+        s = type(err).__name__
+    return _scrub(s)
 
 
 def to_float(v) -> float | None:
@@ -88,9 +108,18 @@ def ok(
     }
 
 
+def err_item(field: str, reason, source: str) -> dict:
+    """부분성공 응답의 errors[] 원소.
+
+    값을 못 채운 필드마다 왜/어디서 실패했는지 남긴다. 값은 null로 두고
+    추정치로 채우지 않는다. reason에 섞인 API 키는 마스킹한다.
+    """
+    return {"field": field, "reason": _reason(reason), "source": source}
+
+
 def fail(name: str, err, source: str = "fallback") -> dict:
     """실패 응답. Claude가 WebSearch로 폴백하도록 error 필드를 채운다.
 
     error 문자열에 섞인 API 키(serviceKey/authkey)는 마스킹한다.
     """
-    return {"name": name, "error": _scrub(str(err)), "source": source}
+    return {"name": name, "error": _reason(err), "source": source}

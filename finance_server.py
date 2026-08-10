@@ -21,10 +21,11 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 from core.cache import cached
-from core.schema import fail
+from core.schema import err_item, fail, now_kst_iso
 from sources import (naver, yahoo, coingecko, upbit, exim, playwright_fb, molit,
                      g2b, fiscal, kr_notice, kr_progress,
-                     dart, ecos, naver_valuation, portfolio, realty_index)
+                     dart, ecos, naver_valuation, portfolio, realty_index,
+                     yahoo_valuation, sec_metrics, fred)
 from sources.region_codes import resolve_region
 from sources.rail_lines import resolve_line
 
@@ -581,6 +582,316 @@ async def get_stock_valuation(ticker: str) -> dict:
             lambda: naver_valuation.from_pc_html(ticker),
         )
     return await cached(f"valuation:{ticker}", fetch, _TTL_VALUATION)
+
+
+# ------------------------------------------- 해외(미국) 종목 밸류에이션
+
+_TTL_GVALUATION = 900.0   # 해외 밸류에이션 15분
+_TTL_PARTIAL = 60.0       # 부분실패 응답은 60초만 캐시(재시도 폭주 방지)
+
+# compare_valuation 기본 비교축. v4 지침 §4-1 [R] 4축 비교와 맞춘 순서.
+_COMPARE_METRICS = ("per", "pbr", "psr", "peg", "market_cap", "roe_pct")
+_MAX_COMPARE = 10
+# 국내 소스(네이버)가 제공하지 않는 지표. 임의 계산하지 않고 null로 둔다.
+_KR_UNAVAILABLE = ("psr", "peg", "roe_pct", "ev_ebitda", "forward_pe",
+                   "enterprise_value", "revenue_ttm", "fcf_ttm",
+                   "gross_margin_pct", "operating_margin_pct", "net_margin_pct",
+                   "pct_from_52wk_high")
+
+
+@mcp.tool()
+async def get_global_valuation(ticker: str) -> dict:
+    """해외(미국) 종목 밸류에이션 — PER/PBR/PSR/PEG/EV-EBITDA/마진/ROE. 키 불필요.
+
+    ticker: Yahoo 심볼(예: 'NVDA', 'AVGO', 'BRK-B'). 국내 6자리 코드는
+            get_stock_valuation을 쓴다. get_stock_valuation의 해외판이다.
+    1순위 Yahoo quoteSummary(crumb 인증), 실패 시 chart v8로 강등해 이름·통화·
+    52주 고저만 채우고 펀더멘털은 null + errors[]로 알린다(부분 성공, 예외 없음).
+    **적자 기업은 trailing_pe/peg가 null인 것이 정상**이며 오류가 아니다.
+    반환: {symbol, name, currency, exchange, market_cap, enterprise_value,
+          trailing_pe, forward_pe, pbr, psr, peg, ev_ebitda, roe_pct,
+          gross_margin_pct, operating_margin_pct, net_margin_pct,
+          dividend_yield_pct, eps_ttm, revenue_ttm, fcf_ttm, price,
+          week52_high, week52_low, pct_from_52wk_high,
+          timestamp, source, data_kind, errors:[{field, reason, source}]}.
+    market_cap/enterprise_value/revenue_ttm/fcf_ttm은 currency 단위 절대금액이다.
+    """
+    sym = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await yahoo_valuation.valuation(sym)
+    return await cached(f"gval:{sym}", fetch, _TTL_GVALUATION,
+                        ttl_partial=_TTL_PARTIAL)
+
+
+def _valuation_row(ticker: str, res, metrics: list[str]) -> dict:
+    """국내/해외 밸류에이션 응답을 공통 지표명으로 흡수한 비교표 1행."""
+    row = {"ticker": ticker, "name": None, "currency": None,
+           "source": None, "errors": []}
+    for m in metrics:
+        row[m] = None
+
+    if isinstance(res, Exception):
+        row["errors"].append(err_item("_row", res, "compare_valuation"))
+        return row
+    if not isinstance(res, dict):
+        row["errors"].append(err_item("_row", f"예상치 못한 응답: {type(res)}",
+                                      "compare_valuation"))
+        return row
+
+    row["name"] = res.get("name")
+    row["source"] = res.get("source")
+    row["errors"].extend(res.get("errors") or [])
+    if res.get("error"):
+        row["errors"].append(err_item("_row", res["error"],
+                                      res.get("source") or "unknown"))
+
+    is_domestic = "market_cap_eok" in res or "code" in res
+    if is_domestic:
+        row["currency"] = res.get("currency") or "KRW"
+        cap_eok = res.get("market_cap_eok")
+        common = {
+            "per": res.get("per"),
+            "pbr": res.get("pbr"),
+            "eps": res.get("eps"),
+            "bps": res.get("bps"),
+            "dividend_yield_pct": res.get("dividend_yield_pct"),
+            "price": res.get("close_price"),
+            # 억원 → 원. 통화 단위를 행마다 다르게 두지 않기 위해 절대금액으로 통일.
+            "market_cap": (cap_eok * 1e8) if isinstance(cap_eok, (int, float)) else None,
+        }
+        for m in metrics:
+            if m in _KR_UNAVAILABLE:
+                row["errors"].append(err_item(
+                    m, "국내 소스(네이버)가 제공하지 않는 지표 — 임의 계산하지 않음",
+                    res.get("source") or "naver"))
+            else:
+                row[m] = common.get(m)
+    else:
+        row["currency"] = res.get("currency")
+        common = dict(res)
+        common["per"] = res.get("trailing_pe")
+        common["eps"] = res.get("eps_ttm")
+        for m in metrics:
+            row[m] = common.get(m)
+    return row
+
+
+@mcp.tool()
+async def compare_valuation(tickers: list[str], metrics: list[str] | None = None,
+                            normalize_krw: bool = False) -> dict:
+    """국내·해외 종목 밸류에이션 **횡단 비교표**(최대 10종목, 병렬 조회).
+
+    tickers: 6자리 숫자면 국내(네이버), 그 외는 Yahoo 심볼로 자동 라우팅한다.
+             혼용 가능(예: ['NVDA', '000660', 'AVGO']).
+    metrics: 비교할 지표. 기본 ['per','pbr','psr','peg','market_cap','roe_pct'].
+             그 밖에 eps, dividend_yield_pct, ev_ebitda, forward_pe, price,
+             gross_margin_pct, operating_margin_pct, net_margin_pct,
+             enterprise_value, revenue_ttm, fcf_ttm, pct_from_52wk_high 사용 가능.
+             **국내 종목은 psr/peg/roe_pct/마진을 제공하지 않아 null**이며
+             그 사유가 행 errors에 남는다(임의 계산하지 않음).
+    normalize_krw: True면 통화가 섞였을 때 market_cap/enterprise_value의 원화
+             환산값을 `*_krw` **추가 필드**로만 붙인다. 원래 통화 값과 currency는
+             그대로 두고, PER 같은 비율 지표는 환산하지 않는다.
+    개별 종목 실패는 그 행의 errors로만 남기고 나머지 행은 정상 반환한다(예외 없음).
+    반환: {rows:[{ticker, name, currency, source, errors, <metrics...>}],
+          as_of, count, requested, dropped, missing_count, usd_krw, note}.
+    통화가 섞이면 market_cap 절대비교가 왜곡되므로 currency를 행마다 확인할 것.
+    """
+    raw = [str(t).strip() for t in (tickers or []) if str(t).strip()]
+    syms, dropped = raw[:_MAX_COMPARE], raw[_MAX_COMPARE:]
+    mets = [str(m).strip() for m in (metrics or _COMPARE_METRICS) if str(m).strip()]
+
+    tasks = [get_stock_valuation(t) if (t.isdigit() and len(t) == 6)
+             else get_global_valuation(t) for t in syms]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    rows = [_valuation_row(t, r, mets) for t, r in zip(syms, results)]
+
+    usd_krw = None
+    if normalize_krw and any(r.get("currency") not in (None, "KRW") for r in rows):
+        fx = await get_exchange_rate("USD/KRW")
+        usd_krw = fx.get("value") if isinstance(fx, dict) else None
+        for r in rows:
+            cur = r.get("currency")
+            for field in ("market_cap", "enterprise_value"):
+                v = r.get(field)
+                if v is None:
+                    continue
+                if cur == "KRW":
+                    r[f"{field}_krw"] = v
+                elif cur == "USD" and usd_krw:
+                    r[f"{field}_krw"] = round(v * usd_krw, 0)
+                else:
+                    r[f"{field}_krw"] = None
+                    r["errors"].append(err_item(
+                        f"{field}_krw",
+                        f"{cur}→KRW 환율을 제공하지 않음(USD만 지원)", "exchange"))
+
+    missing = sum(1 for r in rows for m in mets if r.get(m) is None)
+    return {
+        "rows": rows,
+        "as_of": now_kst_iso(),
+        "count": len(rows),
+        "requested": mets,
+        "dropped": dropped,
+        "missing_count": missing,
+        "usd_krw": usd_krw,
+        "note": "통화가 다르면 market_cap 절대비교가 왜곡된다. currency를 행마다 확인할 것.",
+        "source": "compare_valuation",
+    }
+
+
+# ------------------------------------ 미국 펀더멘털(SEC EDGAR XBRL)
+
+_TTL_SEC = 86400.0   # 공시 자료는 하루 단위로만 바뀐다
+
+
+@mcp.tool()
+async def get_implied_useful_life(ticker: str, years: int = 3) -> dict:
+    """감가상각 **내용연수 역산** — 총 유형자산 ÷ 연환산 감가상각비. SEC_USER_AGENT 필요.
+
+    내용연수를 늘리면 연간 감가상각비가 줄어 이익이 늘어난다. 하이퍼스케일러의
+    AI capex 사이클에서 회계정책 변경은 이익 품질을 크게 흔들므로 방향 전환을
+    감시한다. 10-Q 서술형 각주는 XBRL로 잡히지 않아 역산 프록시로 대체한다.
+
+    ticker: 미국 상장사 티커(예: 'AMZN', 'META', 'MSFT', 'GOOGL').
+    years: 비교할 최근 회계연도 수(기본 3).
+    Gross PP&E 미공시 기업은 Net + 감가상각누계액으로 복원하고(gross_source로 표시),
+    그것도 없으면 그 연도를 건너뛴다. **추정치로 채우지 않는다.**
+    flag: |delta_years| >= 0.3 이면 'extended'(연장)/'shortened'(단축),
+          미만은 'stable', 비교 불가면 'insufficient_data'.
+    반환: {ticker, cik, entity_name,
+          series:[{fy, fp, end, gross_ppe, gross_source, dda_annualized,
+                   dda_basis, implied_life_years, filed, restated}],
+          latest_life, prior_life, delta_years, flag, dda_tag,
+          direct_useful_life, note, timestamp, source, data_kind, errors}.
+    ※ 분모 D&A는 현금흐름표 항목이라 무형자산 상각이 섞일 수 있다(note 참고).
+      회사가 직접 태깅한 내용연수가 있으면 direct_useful_life로 함께 준다.
+    """
+    t = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await sec_metrics.implied_useful_life(t, years)
+    return await cached(f"sec_life:{t}:{years}", fetch, _TTL_SEC,
+                        ttl_partial=_TTL_PARTIAL)
+
+
+@mcp.tool()
+async def get_capex_series(ticker: str, quarters: int = 8) -> dict:
+    """분기별 **CAPEX 실제 집행액**·영업현금흐름·FCF·매출대비 비중. SEC_USER_AGENT 필요.
+
+    가이던스가 아니라 현금흐름표에 찍힌 실제 집행액이다. AI capex 사이클에서
+    발표치와 집행치의 괴리를 잡는 데 쓴다.
+
+    ticker: 미국 상장사 티커(예: 'GOOGL', 'MSFT', 'AMZN', 'META').
+    quarters: 최근 분기 수(기본 8).
+    미국 현금흐름표는 분기 단독이 아니라 **누적(YTD)** 공시가 일반적이라 분기
+    단독값은 누적 차분으로 산출하고 capex_derived/ocf_derived=true로 표시한다.
+    4분기는 연간−3분기누적. 앞 분기 누적이 없으면 값을 만들지 않는다(추정 금지).
+    반환: {ticker, cik, entity_name, tags:{capex, ocf, revenue},
+          series:[{fy, fp, start, end, capex, ocf, fcf, revenue,
+                   capex_to_revenue_pct, capex_derived, ocf_derived,
+                   revenue_derived, filed, restated}],
+          yoy_capex_pct, ttm_capex, ttm_basis, note,
+          timestamp, source, data_kind, errors}.
+    금액 단위는 공시 통화(미국 기업은 USD)의 절대금액이다.
+    """
+    t = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await sec_metrics.capex_series(t, quarters)
+    return await cached(f"sec_capex:{t}:{quarters}", fetch, _TTL_SEC,
+                        ttl_partial=_TTL_PARTIAL)
+
+
+@mcp.tool()
+async def get_sec_fundamentals(ticker: str, concepts: list[str],
+                               years: int = 3) -> dict:
+    """SEC EDGAR XBRL **원자료** — us-gaap 태그별 보고 시계열. SEC_USER_AGENT 필요.
+
+    전용 툴(get_capex_series/get_implied_useful_life)로 안 되는 항목을 직접 팔 때 쓴다.
+    ticker: 미국 상장사 티커. concepts: us-gaap 태그명 리스트
+            (예: ['Revenues', 'NetIncomeLoss', 'ResearchAndDevelopmentExpense']).
+    years: 최근 N개 회계연도(기본 3).
+    동일 기간에 여러 제출본이 있으면 filed 최신본을 채택하고, 값이 바뀌었거나
+    수정신고(10-K/A 등)면 restated=true로 표시한다.
+    ※ **fy/fp는 SEC 원본 라벨이라 '그 사실의 기간'이 아니라 '그 사실이 실린
+      보고서'의 회계연도/분기다.** 전년 동기 비교치도 당해 보고서 라벨로 오므로
+      기간 판단은 반드시 start/end를 쓸 것.
+    반환: {ticker, cik, entity_name,
+          results:[{concept, unit, series:[{fy, fp, form, start, end, val,
+                    filed, accn, restated}]}],
+          note, timestamp, source, data_kind:'filing', errors}.
+    태그가 하나뿐이면 concept/unit/series를 최상위에도 함께 넣어 준다.
+    """
+    t = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await sec_metrics.fundamentals(t, concepts, years)
+    key = f"sec_fund:{t}:{','.join(concepts or [])}:{years}"
+    return await cached(key, fetch, _TTL_SEC, ttl_partial=_TTL_PARTIAL)
+
+
+@mcp.tool()
+async def get_rpo_backlog(ticker: str, quarters: int = 8) -> dict:
+    """잔여 이행의무(RPO) **수주잔고** 시계열 — 클라우드·구독형 계약 백로그.
+    SEC_USER_AGENT 필요.
+
+    ticker: 미국 상장사 티커(예: 'MSFT', 'GOOGL', 'ORCL').
+    quarters: 최근 분기 수(기본 8).
+    us-gaap:RevenueRemainingPerformanceObligation 기준이며 **미공시 기업이 많다** —
+    없으면 disclosed=false, series=[] 로 반환한다(추정하지 않는다).
+    ※ RPO는 세그먼트 축이 붙은 다중 사실로 오는 일이 잦은데 companyconcept는 축을
+      주지 않는다. 같은 시점에 값이 여럿이면 합산하지 않고 filed 최신 1건만
+      채택하며 ambiguous=true로 표시한다.
+    반환: {ticker, cik, entity_name, disclosed, unit,
+          series:[{end, val, form, filed, restated, ambiguous}],
+          percentage, qoq_pct, yoy_pct, note,
+          timestamp, source, data_kind, errors}.
+    """
+    t = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await sec_metrics.rpo_backlog(t, quarters)
+    return await cached(f"sec_rpo:{t}:{quarters}", fetch, _TTL_SEC,
+                        ttl_partial=_TTL_PARTIAL)
+
+
+# ------------------------------------------ 미국 신용스프레드·금리(FRED)
+
+_TTL_FRED = 21600.0   # FRED 일별 갱신 → 6시간
+
+
+@mcp.tool()
+async def get_credit_spreads(series: list[str] | None = None,
+                             period: str = "1y") -> dict:
+    """미국 신용스프레드·금리곡선(FRED) — 위험선호 국면 판단. 키 불필요.
+
+    회사채 스프레드(OAS) 확대는 자금조달 비용 상승 → 설비투자 축소로 이어져
+    **AI capex 사이클에 선행**한다. get_capex_series(실제 집행액)와 함께 읽는다.
+
+    series: FRED 시리즈 ID. 기본 5종 —
+            'BAMLC0A0CM'(IG 회사채 OAS), 'BAMLH0A0HYM2'(하이일드 OAS),
+            'BAMLC0A4CBBB'(BBB OAS), 'DGS10'(국채 10년), 'T10Y2Y'(10Y-2Y).
+    period: 반환할 points 기간 — '1mo','3mo','6mo','1y'(기본),'2y','5y'.
+            **백분위는 period와 무관하게 항상 1년/5년 기준**으로 계산한다.
+    관측이 많으면 주간·월간으로 자동 축약한다(interval 필드 참고).
+    개별 시리즈 실패는 그 행의 error로만 남긴다(부분 성공, 예외 없음).
+    반환: {as_of, period, count,
+          series:[{id, name, unit, latest, latest_date, change_1m, change_3m,
+                   percentile_1y, percentile_5y, interval, count,
+                   points:[{date, value}]}],
+          note, timestamp, source:'FRED', data_kind:'prev_close', errors}.
+    ※ **절대 레벨만으로는 판단할 수 없다.** percentile_1y/5y와 함께 읽을 것.
+      change_1m/3m은 비율(%)이 아니라 절대차(%p)다.
+    """
+    ids = [str(s).strip().upper() for s in (series or fred.DEFAULT_IDS)
+           if str(s).strip()]
+
+    async def fetch():
+        return await fred.spreads(ids, period)
+    return await cached(f"fred:{','.join(ids)}:{period}", fetch, _TTL_FRED,
+                        ttl_partial=_TTL_PARTIAL)
 
 
 # ---------------------------------------------------------------- 거시경제

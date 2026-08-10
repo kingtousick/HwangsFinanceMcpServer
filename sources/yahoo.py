@@ -36,8 +36,12 @@ def auto_interval(period: str) -> str:
     return _AUTO_INTERVAL.get(period, "1d")
 
 
-async def get_quote(symbol: str, name: str | None = None) -> dict:
-    """Yahoo 심볼 시세. symbol 예: '^GSPC', '^SOX', 'AAPL', 'KRW=X'."""
+async def get_meta(symbol: str) -> dict:
+    """chart v8 응답의 meta 블록만 반환(query1 실패 시 query2로 강등).
+
+    meta에는 시세뿐 아니라 currency/exchangeName/fiftyTwoWeekHigh/Low가 들어 있어
+    quoteSummary가 막혔을 때의 최소 폴백 정보원으로도 쓴다.
+    """
     enc = urllib.parse.quote(symbol, safe="")
     params = {"range": "1d", "interval": "1d"}
     last_exc: Exception | None = None
@@ -45,26 +49,31 @@ async def get_quote(symbol: str, name: str | None = None) -> dict:
         url = f"https://{host}{_PATH.format(symbol=enc)}"
         try:
             data = await http.get_json(url, params=params, retries=0)
-            m = data["chart"]["result"][0]["meta"]
-            value = to_float(m.get("regularMarketPrice"))
-            prev = to_float(m.get("chartPreviousClose"))
-            change = None
-            pct = None
-            if value is not None and prev not in (None, 0):
-                change = value - prev
-                pct = change / prev * 100
-            return ok(
-                name or m.get("shortName") or symbol,
-                value,
-                change=change,
-                change_pct=pct,
-                timestamp=epoch_to_kst_iso(m.get("regularMarketTime")),
-                currency=m.get("currency"),
-                source="yahoo",
-            )
+            return data["chart"]["result"][0]["meta"]
         except Exception as e:  # noqa: BLE001 - query2로 강등
             last_exc = e
     raise last_exc  # type: ignore[misc]
+
+
+async def get_quote(symbol: str, name: str | None = None) -> dict:
+    """Yahoo 심볼 시세. symbol 예: '^GSPC', '^SOX', 'AAPL', 'KRW=X'."""
+    m = await get_meta(symbol)
+    value = to_float(m.get("regularMarketPrice"))
+    prev = to_float(m.get("chartPreviousClose"))
+    change = None
+    pct = None
+    if value is not None and prev not in (None, 0):
+        change = value - prev
+        pct = change / prev * 100
+    return ok(
+        name or m.get("shortName") or symbol,
+        value,
+        change=change,
+        change_pct=pct,
+        timestamp=epoch_to_kst_iso(m.get("regularMarketTime")),
+        currency=m.get("currency"),
+        source="yahoo",
+    )
 
 
 def _local_date(epoch, gmtoffset: int) -> str | None:

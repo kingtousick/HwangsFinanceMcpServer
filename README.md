@@ -28,7 +28,14 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_rail_project_status(query)` | 한 노선의 예산·발주·고시·공정률 통합 스냅샷 | `"GTX-A"` |
 | `search_stock_code(name)` | 종목명→6자리 코드 검색(DART 상장사 인덱스) | `"삼성전자"` |
 | `get_dart_disclosures(query, days=90)` | 최근 DART 전자공시(리스크 신호) | `"005930"`, `"에코프로"` |
-| `get_stock_valuation(ticker)` | PER/PBR/EPS/BPS/배당수익률/시가총액 | `"005930"` |
+| `get_stock_valuation(ticker)` | PER/PBR/EPS/BPS/배당수익률/시가총액 (국내) | `"005930"` |
+| `get_global_valuation(ticker)` | **해외** 밸류에이션 PER/PBR/PSR/PEG/EV-EBITDA/ROE·마진 | `"NVDA"`, `"AVGO"` |
+| `compare_valuation(tickers, metrics=None, normalize_krw=False)` | 국내·해외 **횡단 비교표**(최대 10종목, 자동 라우팅) | `["NVDA","000660"]` |
+| `get_implied_useful_life(ticker, years=3)` | 감가상각 **내용연수 역산**(연장/단축 감지) | `"AMZN"`, `"META"` |
+| `get_capex_series(ticker, quarters=8)` | 분기별 **CAPEX 실제 집행액**·OCF·FCF·매출대비 비중 | `"GOOGL"`, `8` |
+| `get_sec_fundamentals(ticker, concepts, years=3)` | SEC XBRL **원자료**(us-gaap 태그 직접 조회) | `"NVDA"`, `["Revenues"]` |
+| `get_rpo_backlog(ticker, quarters=8)` | 잔여 이행의무(RPO) **수주잔고** | `"MSFT"` |
+| `get_credit_spreads(series=None, period="1y")` | 미국 **신용스프레드·금리곡선**(FRED, 백분위 포함) | — |
 | `get_macro_indicators(keywords=None)` | 한은 ECOS 100대 통계지표(금리·물가·M2 등) | `["기준금리","가계신용"]` |
 | `get_macro_series(indicator, periods=36)` | 거시지표 **시계열**(추이·변화율) | `"기준금리"`, `"국고채3년"` |
 | `get_realty_price_index(region, kind, house_type, months, source)` | 주택 매매/전세 **가격지수 시계열** | `"서울"`, `"매매"`, `"아파트"` |
@@ -37,6 +44,7 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 ### 티커 형식
 - **국내 주식/ETF**: 6자리 코드 (`005930`, `381180`) → 네이버 polling
 - **해외 주식/지수**: Yahoo 심볼 (`^GSPC`, `^IXIC`, `^SOX`, `AAPL`) → Yahoo chart API
+  - 클래스 주식은 하이픈 (`BRK-B`). SEC 계열 Tool은 `BRK.B`도 자동 정규화한다.
 - **환율**: `USD/KRW` (Yahoo `KRW=X`)
 - **크립토**: 심볼 + quote (`BTC`/`KRW`, `ETH`/`USD`) → CoinGecko
 
@@ -50,6 +58,17 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 ```json
 {"name":"KOSPI","error":"timeout","source":"fallback"}
 ```
+미국 밸류에이션·펀더멘털 Tool(`get_global_valuation`, SEC·FRED 계열)은 **부분 성공**
+스키마를 쓴다. 예외를 던지지 않고, 못 채운 값은 `null`로 두고 사유를 `errors[]`에 남긴다
+(**추정치로 채우지 않는다**). 모든 응답에 `timestamp`·`source`·`data_kind`가 붙는다.
+```json
+{"symbol":"NVDA","trailing_pe":34.24,"peg":null,
+ "timestamp":"2026-08-10T15:54:01+09:00","source":"yahoo_quote_summary",
+ "data_kind":"prev_close",
+ "errors":[{"field":"financialData","reason":"quoteSummary 모듈 미제공","source":"yahoo"}]}
+```
+`data_kind`는 `realtime` | `intraday` | `prev_close` | `filing` 중 하나로, 그 숫자가
+어느 시점의 것인지 알려준다(`filing`은 공시 원문 기준).
 
 ## 소스 우선순위 (자동 강등)
 
@@ -60,6 +79,9 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | 해외 주식/지수 | Yahoo(query1) | Yahoo(query2) | — |
 | USD/KRW | Yahoo `KRW=X` | EXIM(키) | — |
 | 크립토 | CoinGecko | 업비트(KRW, 도달 시) | — |
+| 해외 밸류에이션 | Yahoo quoteSummary(crumb) | Yahoo chart v8(부분) | `errors[]` |
+| 미국 재무 원자료 | SEC EDGAR XBRL companyconcept | — | `errors[]` |
+| 신용스프레드·금리 | FRED CSV | — | `errors[]` |
 
 상위 실패 시 다음 소스로 자동 강등, 전부 실패 시 `{error, source:"fallback"}`.
 
@@ -266,10 +288,62 @@ period에 맞춰 자동 선택해 **관측 수를 50~120점으로 유지**한다
   (`errors` 배열과 총계 제외로 확인).
 - YAML(`.yml`/`.yaml`)로 쓰려면 `pip install pyyaml`.
 
+### 미국 종목 밸류에이션·펀더멘털 사용법
+
+무료·키불필요 소스만 쓴다(Yahoo / SEC EDGAR / FRED). **SEC 계열 3종만
+`SEC_USER_AGENT`가 필요**하다.
+
+| 질문 | Tool | 소스 | 필요 설정 |
+|---|---|---|---|
+| 비싼가(밸류) | `get_global_valuation` | Yahoo quoteSummary | 없음 |
+| 대안 대비 비싼가 | `compare_valuation` | 국내+해외 자동 라우팅 | 없음 |
+| 회계로 이익을 부풀렸나 | `get_implied_useful_life` | SEC XBRL | `SEC_USER_AGENT` |
+| 실제로 얼마 쓰고 있나 | `get_capex_series` | SEC XBRL | `SEC_USER_AGENT` |
+| 수주잔고는 | `get_rpo_backlog` | SEC XBRL | `SEC_USER_AGENT` |
+| 그 밖의 재무 항목 | `get_sec_fundamentals` | SEC XBRL | `SEC_USER_AGENT` |
+| 돈줄이 조이나 | `get_credit_spreads` | FRED | 없음 |
+
+```python
+# 밸류 4축 비교 — 6자리 코드는 네이버, 그 외는 Yahoo로 자동 라우팅
+compare_valuation(["NVDA", "AVGO", "MU", "000660"])
+# → rows[].currency가 USD/KRW로 갈리므로 market_cap 절대비교는 하지 말 것
+#    (필요하면 normalize_krw=True로 market_cap_krw 필드를 추가로 받는다)
+
+get_implied_useful_life("AMZN")     # flag: extended | shortened | stable
+get_capex_series("GOOGL", 8)        # capex_derived=true면 YTD 누적 차분값
+get_credit_spreads()                # percentile_1y/5y와 함께 읽을 것
+```
+
+읽을 때 반드시 지킬 것:
+- **적자 기업의 `trailing_pe`/`peg`가 `null`인 것은 정상**이다(오류 아님).
+- 국내 종목은 PSR/PEG/ROE·마진을 소스가 주지 않아 `null`이며, 그 사유가 행
+  `errors[]`에 남는다. **임의로 계산해 채우지 않는다**(정의가 달라 비교가 왜곡됨).
+- `get_capex_series`의 `*_derived=true`는 분기 단독 공시가 없어 **YTD 누적 차분**으로
+  만든 값이라는 뜻이다. 앞 분기 누적이 없으면 아예 값을 만들지 않는다.
+- `get_sec_fundamentals`의 `fy`/`fp`는 SEC 원본 라벨이라 **'그 사실의 기간'이 아니라
+  '그 사실이 실린 보고서'의 회계연도/분기**다. 기간 판단은 `start`/`end`로 한다.
+- `get_credit_spreads`의 `change_1m/3m`은 비율(%)이 아니라 **절대차(%p)**다.
+
+### SEC EDGAR 설정
+
+SEC는 `"이름 이메일"` 형식의 User-Agent를 요구하며 없으면 **403**을 준다.
+미설정 시 서버는 403을 그대로 던지지 않고 조치 안내를 `errors[]`로 돌려준다.
+
+```bash
+# .env
+SEC_USER_AGENT="Hong Gildong hong@example.com"
+```
+요청은 초당 8건으로 자동 제한한다(SEC 하드리밋 10 req/s에서 20% 마진).
+
 ## 비기능
-- 메모리 TTL 캐시 30초(동일 키 중복 호출 방지). 공사현황은 길게(입찰 30분/고시·공정률 6시간/예산 1일)
-- 호출당 5초 타임아웃, 1순위 1회 재시도 후 강등
-- 전 Tool 예외 포착 → fallback 반환(서버 크래시 없음)
+- 메모리 TTL 캐시 30초(동일 키 중복 호출 방지). 공사현황은 길게(입찰 30분/고시·공정률 6시간/예산 1일),
+  해외 밸류에이션 15분 / FRED 6시간 / SEC 공시 24시간
+- SEC·FRED 응답은 **파일 캐시**도 함께 쓴다(MCP는 stdio라 프로세스가 자주 재시작된다).
+  위치는 `FINANCE_MCP_CACHE_DIR` > `%LOCALAPPDATA%\finance-mcp\cache` > `~/.cache/finance-mcp`
+- 실패·부분실패 응답은 캐시하지 않는다(부분실패는 60초만 — 재시도 폭주 방지)
+- 호출당 5초 타임아웃, 1순위 1회 재시도 후 강등. 신규 해외 소스는 10초·3회 지수백오프
+  (429/503은 `Retry-After` 우선). **4xx는 재시도하지 않는다**(404 = 미공시 태그는 영구 사실)
+- 전 Tool 예외 포착 → fallback 또는 `errors[]` 반환(서버 크래시 없음)
 - 로그는 stderr만(stdout은 MCP 전용)
 
 ## 테스트
@@ -279,4 +353,17 @@ period에 맞춰 자동 선택해 **관측 수를 50~120점으로 유지**한다
 HTTP는 `respx`로 모킹한다(네트워크 불필요).
 
 ## 비대상 (Non-Goals)
-매매/계좌 연동, 실시간 스트리밍, DB 영속화, 차트 이미지 생성.
+매매/계좌 연동, 실시간 스트리밍, DB 영속화(계좌·거래내역), 차트 이미지 생성.
+(SEC/FRED **HTTP 응답 파일 캐시**는 DB 영속화가 아니라 재기동 시 재다운로드를 막는
+최적화이며, 지워도 동작에 영향이 없다.)
+
+미국 종목 관련으로 **의도적으로 구현하지 않은 것** — MCP로 검증 불가하므로
+WebSearch로만 처리하고, 리포트에는 반드시 출처를 병기한다:
+
+| 항목 | 이유 |
+|---|---|
+| DRAM 현물·계약가 | TrendForce/DRAMeXchange 전량 유료. 무료 소스 없음(**영구 제외**) |
+| 애널리스트 컨센서스 목표주가 | 무료 소스 신뢰도 미달 |
+| 10-Q 서술형 각주 원문 파싱 | XBRL로 안 잡힘 → `get_implied_useful_life` 역산 프록시로 대체. 원문이 필요하면 EDGAR 파일링을 직접 열 것 |
+
+어떤 Tool도 값을 **추정·보간하지 않는다**. 모르면 `null` + `errors[]`다.

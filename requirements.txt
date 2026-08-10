@@ -1,4 +1,4 @@
-mcp>=1.2.0
+mcp>=1.2.0,<2  # 2.0.0에서 mcp.server.fastmcp 제거됨 → 1.x 고정
 httpx>=0.27
 python-dotenv>=1.0
 truststore>=0.9  # 사내망 TLS 가로채기 환경: OS 인증서 저장소 사용
