@@ -23,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from core.cache import cached
 from core.schema import err_item, fail, now_kst_iso
 from sources import (naver, yahoo, coingecko, upbit, exim, playwright_fb, molit,
-                     g2b, fiscal, kr_notice, kr_progress,
+                     kapt, g2b, fiscal, kr_notice, kr_progress,
                      dart, ecos, naver_valuation, portfolio, realty_index,
                      yahoo_valuation, sec_metrics, fred)
 from sources.region_codes import resolve_region
@@ -203,6 +203,9 @@ async def get_crypto(symbol: str = "BTC", quote: str = "KRW") -> dict:
 
 # ---------------------------------------------------------------- 부동산 실거래가
 
+# 단지 기본정보(세대수·동수·사용승인일)는 준공 후 사실상 불변이라 7일 캐시.
+_TTL_KAPT = 7 * 86400.0
+
 
 def _normalize_ym(deal_ym: str) -> str:
     """'2026-04', '2026.04', '202604' → '202604'."""
@@ -246,9 +249,15 @@ async def get_apt_trade_summary(region: str, deal_ym: str, months: int = 1,
             평균을 안정적으로 내려면 months=3~6 사용.
     거래를 (법정동, 단지)별로 묶어 평균 평당가 내림차순으로 반환.
     반환: {name, region_code, deal_ym, months, period, complex_count, deal_count,
-          items:[{apt, dong, count, avg_price_per_pyeong, min_price_per_pyeong,
-                  max_price_per_pyeong, avg_deal_amount, avg_pyeong}], source}.
-    평당가는 전용면적 기준.
+          households_matched, households_pending, items:[{apt, dong, count,
+                  avg_price_per_pyeong, min_price_per_pyeong, max_price_per_pyeong,
+                  avg_deal_amount, avg_pyeong, households(세대수), dong_count(동수),
+                  use_date(사용승인일), turnover_rate(기간 거래건수÷세대수 %),
+                  households_shared}], source}.
+    평당가는 전용면적 기준. 세대수 계열 필드는 K-apt API(공동주택 단지목록·기본정보
+    활용신청 필요)로 보강하며, 미신청/미등록/이름 매칭 실패 시 None이다(실측 매칭률
+    약 50% — K-apt가 여러 차수를 한 단지로 통합 등록한 경우가 많다).
+    households_shared=True면 통합 등록 단지라 turnover_rate가 과소평가된 값이다.
     """
     try:
         code = resolve_region(region)
@@ -257,11 +266,44 @@ async def get_apt_trade_summary(region: str, deal_ym: str, months: int = 1,
     ym = _normalize_ym(deal_ym)
 
     async def fetch():
-        return await _cascade(
+        res = await _cascade(
             f"단지별평당가:{code}:{ym}:{months}",
             lambda: molit.apt_trade_summary(code, ym, rows, months),
         )
+        if "error" not in res:
+            # 세대수는 부가 지표 — 실패해도 실거래 집계는 그대로 반환한다.
+            await kapt.attach_households(code, res)
+        return res
     return await cached(f"apt_trade_summary:{code}:{ym}:{months}:{rows}", fetch)
+
+
+@mcp.tool()
+async def get_apt_complex_info(region: str, complex_name: str) -> dict:
+    """아파트 단지 기본정보(세대수·동수·사용승인일 등). K-apt 공동주택 API.
+    DATA_GO_KR_API_KEY(또는 MOLIT_API_KEY) 필요 +
+    '공동주택 단지 목록제공 서비스'·'공동주택 기본 정보제공 서비스' 활용신청 필요.
+
+    region: 지역명 또는 5자리 시군구 법정동코드(get_apt_trade와 동일 자동 변환).
+    complex_name: 단지명. 공백/괄호/'제N단지'/'아파트' 표기 차이는 자동 흡수.
+    반환: {name, region_code, query, matched:{kapt_code, name, dong, households(세대수),
+          dong_count, ho_count, use_date, top_floor, total_area, priv_area, sale_type,
+          heat_type, hall_type, builder, addr, road_addr, area_band}, candidates, source}.
+    이름이 애매하면 matched=None이고 candidates에 후보 단지명이 담긴다.
+    의무관리대상 공동주택만 등록돼 오피스텔·소규모 단지는 조회되지 않는다.
+    """
+    try:
+        code = resolve_region(region)
+    except ValueError as e:
+        return fail(f"단지정보:{region}", e)
+
+    async def fetch():
+        return await _cascade(
+            f"단지정보:{code}:{complex_name}",
+            lambda: kapt.complex_info(code, complex_name),
+        )
+    # 세대수는 준공 후 불변 — 메모리/디스크 캐시를 길게 잡는다.
+    return await cached(f"apt_complex:{code}:{kapt.norm_name(complex_name)}",
+                        fetch, ttl=_TTL_KAPT, disk=True)
 
 
 @mcp.tool()

@@ -19,6 +19,8 @@ import time
 
 import httpx
 
+from core.schema import scrub_secrets
+
 logger = logging.getLogger("finance-mcp")
 
 
@@ -134,8 +136,10 @@ async def _request(url: str, *, params: dict | None = None,
             return out
         except Exception as e:  # noqa: BLE001 - 의도적으로 모든 예외 포착해 강등
             last_exc = e
+            # httpx 예외 메시지에는 쿼리스트링째 URL이 실린다 → 키 마스킹 후 기록.
             logger.warning("GET fail url=%s attempt=%d %.0fms err=%s",
-                           url, attempt, (time.perf_counter() - t0) * 1000, e)
+                           url, attempt, (time.perf_counter() - t0) * 1000,
+                           scrub_secrets(e))
             if _is_permanent(e):
                 break  # 404/400 등은 재시도해도 같다
             if backoff and attempt < retries:

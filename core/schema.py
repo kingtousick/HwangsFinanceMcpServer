@@ -41,6 +41,15 @@ def _scrub(s: str) -> str:
     return _PATH_KEY_RE.sub(r"\1***", _SECRET_RE.sub(r"\1=***", s))
 
 
+def scrub_secrets(err) -> str:
+    """예외/문자열에 섞인 API 키를 마스킹한 문자열. **로그에 예외를 남길 때 쓴다.**
+
+    httpx 예외 메시지에는 요청 URL이 통째로 실리므로 그냥 logger에 넘기면
+    serviceKey가 stderr에 남는다(fail()로 가는 경로는 _reason이 이미 처리).
+    """
+    return _reason(err)
+
+
 def _reason(err) -> str:
     """예외/문자열을 사람이 읽을 수 있는 사유 문자열로.
 

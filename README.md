@@ -15,7 +15,8 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `get_market_snapshot()` | 8개 핵심 지표 일괄(리포트용) | — |
 | `get_price_history(ticker, period="1y", interval=None)` | 과거 시세 시계열 + 수익률·MDD·변동성 | `"005930"`, `"^GSPC"`, `"BTC-USD"` |
 | `get_apt_trade(region, deal_ym)` | 아파트 매매 실거래가(평수·평당가 포함) | `"강남구"`, `"2024-06"` |
-| `get_apt_trade_summary(region, deal_ym, months=1)` | 단지별 평균 평당가 집계 | `"강남구"`, `"2024-06"`, `6` |
+| `get_apt_trade_summary(region, deal_ym, months=1)` | 단지별 평균 평당가 집계(+세대수·회전율) | `"강남구"`, `"2024-06"`, `6` |
+| `get_apt_complex_info(region, complex_name)` | 단지 기본정보(세대수·동수·사용승인일) | `"강남구"`, `"은마아파트"` |
 | `get_apt_rent(region, deal_ym)` | 아파트 전월세 실거래가 | `"강남구"`, `"2024-06"` |
 | `get_jeonse_ratio(region, deal_ym, months=1)` | 단지별 전세가율 집계 | `"강남구"`, `"2024-06"`, `6` |
 | `get_offi_trade(region, deal_ym)` | 오피스텔 매매 실거래가(평수·평당가) | `"강남구"`, `"2024-06"` |
@@ -117,6 +118,8 @@ py -m venv .venv
 - `EXIM_API_KEY`: 한국수출입은행 환율 API(가정용 PC 환율 폴백).
 - `FINNHUB_KEY`: 미국 주식 폴백(예약, 현재 미사용).
 - `MOLIT_API_KEY`: 국토교통부 실거래가 API(`get_apt_trade`/`get_apt_rent`에 필수).
+  세대수 도구(`get_apt_complex_info`, `get_apt_trade_summary`의 세대수 필드)도 같은
+  키를 쓴다(`DATA_GO_KR_API_KEY` 우선). 단, K-apt 데이터셋 2종 활용신청 별도 필요.
 - `DART_API_KEY`: DART 전자공시(`search_stock_code`/`get_dart_disclosures`에 필수).
   [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 발급.
 - `ECOS_API_KEY`: 한국은행 ECOS(`get_macro_indicators`/`get_macro_series`/
@@ -158,6 +161,58 @@ get_jeonse_ratio("강남구", "2026-04", months=6)       # 250단지 매칭, 평
 > 둘 다 쓰려면 data.go.kr에서 각각 활용신청해야 한다(한쪽만 신청 시 다른 쪽은 403).
 > data.go.kr WAF가 curl 기본 UA를 차단하므로 서버는 브라우저 UA로 호출한다(코드 내 처리됨).
 > 응답 XML은 stdlib로 파싱하며 전월세 필드는 실데이터로 검증됨(2026-06-22).
+
+#### 세대수·회전율 (K-apt 공동주택 API)
+실거래가 API는 **세대수를 주지 않는다**. 단지 규모를 알아야 거래건수를 정규화할 수
+있으므로 K-apt(공동주택관리정보시스템) 2개 API를 결합한다(`sources/kapt.py`).
+
+| 용도 | 데이터셋(활용신청 이름) | 엔드포인트 |
+|---|---|---|
+| 단지목록(시군구→단지코드) | **국토교통부_공동주택 단지 목록제공 서비스** | `AptListService3/getSigunguAptList3` |
+| 기본정보(단지코드→세대수) | **국토교통부_공동주택 기본 정보제공 서비스** | `AptBasisInfoServiceV4/getAphusBassInfoV4` |
+
+- 키는 `DATA_GO_KR_API_KEY`(없으면 `MOLIT_API_KEY`)를 그대로 쓰지만 **두 데이터셋 모두
+  별도 활용신청**이 필요하다(미신청 시 403, `returnReasonCode 30`).
+- 신청 전이거나 K-apt 미등록 단지면 세대수 필드는 `None`이고 실거래 집계는 평소대로
+  나온다 — 세대수는 부가 지표라 실패해도 강등되지 않는다.
+- `get_apt_trade_summary` items에 추가되는 필드:
+  `households`(세대수), `dong_count`(동수), `use_date`(사용승인일),
+  `turnover_rate`(= 기간 거래건수 ÷ 세대수 × 100, %),
+  `households_shared`(통합 등록 단지에만 True — 아래 참고).
+  요약에는 `households_matched`(채운 단지 수), `households_pending`(호출 상한에 걸려
+  다음 조회로 밀린 단지 수, 보통 0).
+- 세대수는 준공 후 불변이라 디스크 캐시 30일. 첫 호출만 5~10초(강남구 6개월 기준 8초),
+  이후 같은 지역은 캐시로 1초 내.
+
+```python
+get_apt_complex_info("강남구", "은마아파트")
+# → matched: {households: 4424, dong_count: 28, use_date: "1979-08-30",
+#             hall_type: "복도식", builder: "한보", area_band: {"60~85": 24, "85~135": 4400}}
+
+get_apt_trade_summary("강남구", "2026-04", months=6)
+# → 328단지 / 1,463건, 세대수 137단지 매칭
+# → items[i]: {..., households: 1403, turnover_rate: 1.283}
+```
+
+**매칭률은 약 50%** (강남구 2026-04 실측: 168단지 중 86단지). 실거래 단지명과 K-apt
+단지명을 (법정동, 정규화 단지명)으로 붙이는데, 정규화가 흡수하는 차이는 이렇다:
+
+| 실거래 표기 | K-apt 표기 | 처리 |
+|---|---|---|
+| `미성2차` | `압구정미성2차` | 동명 접두 → 부분일치로 매칭 |
+| `개포우성2` | `개포우성8차` | `N차`/`N단지` → `N`으로 통일 |
+| `현대14차(203,204,205,206동)` | — | 괄호 안 동번호·별칭 제거 |
+| `대치우성아파트1동,2동,3동` | `대치우성1차아파트` | 동 번호 나열 제거 |
+
+못 붙는 나머지는 **K-apt가 여러 차수를 한 단지로 통합 등록**했거나(`압구정 현대(10,13,14차)`
+↔ 실거래 `현대14차`) 애초에 미등록(소규모 단지)인 경우다. 정규화로 더 짜낼 수 있지만
+남의 세대수가 붙는 오매칭이 결측보다 나쁘므로 **후보가 둘 이상이면 포기**하고, 탐색도
+**같은 법정동으로 한정**한다(시군구 전체로 넓히면 `현대1`(대치동)이 `개포현대1차`(개포동)에
+붙는 오매칭이 실제로 발생했다).
+
+> `households_shared: true`가 붙은 단지는 한 K-apt 단지에 실거래 단지 여러 개가 매칭된
+> 경우다(`LG선릉에클라트(A)`·`(B)` → `선릉에클라트`). 세대수가 통합값이라 **회전율이
+> 실제보다 낮게** 나오니 그대로 믿지 말 것.
 
 ### 공사현황(철도/광역교통) 사용법
 부동산 가치의 선행지표인 교통 인프라 진행상황을 노선/사업명 하나로 조회한다. 자동화

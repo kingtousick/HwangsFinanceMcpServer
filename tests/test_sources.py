@@ -8,6 +8,8 @@
   - 캐시 재호출 시 외부 호출 0회
   - get_market_snapshot 8개 지표 일괄
 """
+import logging
+
 import httpx
 import pytest
 import respx
@@ -301,6 +303,19 @@ def test_fail_scrubs_api_key():
     res = fail("매매", leaked)
     assert "SECRET123" not in res["error"]
     assert "serviceKey=***" in res["error"]
+
+
+@respx.mock
+async def test_http_warning_log_scrubs_api_key(caplog):
+    """GET 실패 WARNING 로그에도 키가 남으면 안 된다(httpx 예외에 URL이 통째로 실림)."""
+    url = "https://apis.data.go.kr/1613000/Dummy/get"
+    respx.get(url).mock(return_value=httpx.Response(403, text="denied"))
+    with caplog.at_level(logging.WARNING, logger="finance-mcp"):
+        with pytest.raises(httpx.HTTPStatusError):
+            await http.get_text(url, params={"serviceKey": "SECRET123"})
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SECRET123" not in logs
+    assert "serviceKey=***" in logs
 
 
 def test_resolve_region():
