@@ -200,16 +200,19 @@ async def test_capex_missing_user_agent(monkeypatch):
 # ---------------------------------------------------------------- 원자료 툴
 
 @respx.mock
-async def test_sec_fundamentals_single_concept_mirrors_to_top_level():
+async def test_sec_fundamentals_single_concept_stays_in_results():
+    """단일 태그도 최상위에 미러링하지 않는다 — 같은 시계열이 두 번 실려
+    응답이 정확히 2배가 됐기 때문(실측: ADBE Revenues 단독 7,680자)."""
     _mock_tickers()
     _mock_concept("Revenues", _cc([
         _f("2025-01-01", "2025-12-31", 460.0, form="10-K", filed="2026-02-01"),
         _f("2024-01-01", "2024-12-31", 400.0, form="10-K", filed="2025-02-01"),
     ]))
     r = await srv.get_sec_fundamentals("GOOGL", ["Revenues"], years=3)
-    assert r["concept"] == "Revenues" and r["unit"] == "USD"
-    assert [s["val"] for s in r["series"]] == [400.0, 460.0]
-    assert r["results"][0]["concept"] == "Revenues"
+    assert "series" not in r and "concept" not in r
+    res = r["results"][0]
+    assert res["concept"] == "Revenues" and res["unit"] == "USD"
+    assert [s["val"] for s in res["series"]] == [400.0, 460.0]
     assert r["data_kind"] == "filing"
 
 
@@ -221,10 +224,11 @@ async def test_sec_fundamentals_prefers_latest_filed_and_flags_restated():
         _f("2025-01-01", "2025-12-31", 95.0, form="10-K/A", filed="2026-06-01"),
     ]))
     r = await srv.get_sec_fundamentals("GOOGL", ["NetIncomeLoss"])
-    assert len(r["series"]) == 1
-    assert r["series"][0]["val"] == 95.0          # filed 최신본
-    assert r["series"][0]["form"] == "10-K/A"
-    assert r["series"][0]["restated"] is True
+    series = r["results"][0]["series"]
+    assert len(series) == 1
+    assert series[0]["val"] == 95.0               # filed 최신본
+    assert series[0]["form"] == "10-K/A"
+    assert series[0]["restated"] is True
 
 
 @respx.mock
@@ -236,7 +240,7 @@ async def test_sec_fundamentals_partial_failure_per_concept():
     assert len(r["results"]) == 2
     assert r["results"][0]["series"] and r["results"][1]["series"] == []
     assert r["errors"][0]["field"] == "NoSuchTag"
-    assert "concept" not in r     # 태그가 2개면 최상위 미러링 없음
+    assert "concept" not in r and "series" not in r   # 최상위 미러링 없음
 
 
 async def test_sec_fundamentals_requires_concepts():

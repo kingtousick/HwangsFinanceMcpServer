@@ -34,6 +34,7 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `compare_valuation(tickers, metrics=None, normalize_krw=False)` | 국내·해외 **횡단 비교표**(최대 10종목, 자동 라우팅) | `["NVDA","000660"]` |
 | `get_implied_useful_life(ticker, years=3)` | 감가상각 **내용연수 역산**(연장/단축 감지) | `"AMZN"`, `"META"` |
 | `get_capex_series(ticker, quarters=8)` | 분기별 **CAPEX 실제 집행액**·OCF·FCF·매출대비 비중 | `"GOOGL"`, `8` |
+| `get_sec_annual_metrics(ticker, years=5)` | 연간 **핵심지표 한 판**(태그 폴백·유도 필드 포함) | `"ADBE"`, `5` |
 | `get_sec_fundamentals(ticker, concepts, years=3)` | SEC XBRL **원자료**(us-gaap 태그 직접 조회) | `"NVDA"`, `["Revenues"]` |
 | `get_rpo_backlog(ticker, quarters=8)` | 잔여 이행의무(RPO) **수주잔고** | `"MSFT"` |
 | `get_credit_spreads(series=None, period="1y")` | 미국 **신용스프레드·금리곡선**(FRED, 백분위 포함) | — |
@@ -355,6 +356,7 @@ period에 맞춰 자동 선택해 **관측 수를 50~120점으로 유지**한다
 | 회계로 이익을 부풀렸나 | `get_implied_useful_life` | SEC XBRL | `SEC_USER_AGENT` |
 | 실제로 얼마 쓰고 있나 | `get_capex_series` | SEC XBRL | `SEC_USER_AGENT` |
 | 수주잔고는 | `get_rpo_backlog` | SEC XBRL | `SEC_USER_AGENT` |
+| 여러 종목을 한 번에 거를 때 | `get_sec_annual_metrics` | SEC XBRL | `SEC_USER_AGENT` |
 | 그 밖의 재무 항목 | `get_sec_fundamentals` | SEC XBRL | `SEC_USER_AGENT` |
 | 돈줄이 조이나 | `get_credit_spreads` | FRED | 없음 |
 
@@ -366,6 +368,7 @@ compare_valuation(["NVDA", "AVGO", "MU", "000660"])
 
 get_implied_useful_life("AMZN")     # flag: extended | shortened | stable
 get_capex_series("GOOGL", 8)        # capex_derived=true면 YTD 누적 차분값
+get_sec_annual_metrics("ADBE", 5)   # 태그를 몰라도 된다. tags{}에 채택 태그가 온다
 get_credit_spreads()                # percentile_1y/5y와 함께 읽을 것
 ```
 
@@ -377,6 +380,16 @@ get_credit_spreads()                # percentile_1y/5y와 함께 읽을 것
   만든 값이라는 뜻이다. 앞 분기 누적이 없으면 아예 값을 만들지 않는다.
 - `get_sec_fundamentals`의 `fy`/`fp`는 SEC 원본 라벨이라 **'그 사실의 기간'이 아니라
   '그 사실이 실린 보고서'의 회계연도/분기**다. 기간 판단은 `start`/`end`로 한다.
+- 여러 종목을 스크리닝할 때는 `get_sec_fundamentals`가 아니라
+  **`get_sec_annual_metrics`**를 쓴다. 항목마다 태그 후보를 전부 조회해 최근 연도
+  커버리지가 가장 넓은 것을 채택하므로 회사별 태그 편차로 값이 비는 일이 없고,
+  응답도 훨씬 작다(실측 ADBE 5년: 원자료 8태그 5,558토큰 → 1,430토큰).
+- `get_sec_annual_metrics`의 `roe_pct`가 `null`이고 `equity_negative=true`면
+  **자기자본이 음수라 ROE가 의미를 갖지 못한다**는 뜻이다(자사주 매입 누적 등).
+  그대로 두면 −3,000%대 값이 나와 스크리닝을 오염시키므로 ROIC 등으로 대체한다.
+- `dividend_status='not_tagged'`는 배당 태그 후보가 **전부** 미공시라는 뜻으로
+  무배당 기업일 가능성이 높다. 이때 `retained`는 배당 0으로 계산하며
+  `retained_assumes_no_dividend=true`로 표시된다.
 - `get_credit_spreads`의 `change_1m/3m`은 비율(%)이 아니라 **절대차(%p)**다.
 
 ### SEC EDGAR 설정

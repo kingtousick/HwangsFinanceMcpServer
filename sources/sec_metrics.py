@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 
 from core import xbrl
 from core.schema import FILING, err_item, now_kst_iso
@@ -348,10 +348,9 @@ async def fundamentals(ticker: str, concepts: list[str], years: int = 3) -> dict
         out["results"].append({"concept": tag, "unit": unit,
                                "series": _raw_series(facts, years)})
 
-    # 단일 태그 조회는 최상위에도 펼쳐 준다(호출부 편의).
-    if len(out["results"]) == 1:
-        r = out["results"][0]
-        out["concept"], out["unit"], out["series"] = r["concept"], r["unit"], r["series"]
+    # 단일 태그도 최상위에 펼치지 않는다. 예전에는 호출부 편의로 series를 최상위에
+    # 중복 수록했는데, 같은 시계열이 두 번 실려 응답이 정확히 2배가 됐다(실측:
+    # ADBE Revenues 단독 7,680자 = 2태그 요청과 동일). 항상 results[]에서 읽는다.
     return out
 
 
@@ -410,4 +409,258 @@ async def rpo_backlog(ticker: str, quarters: int = 8) -> dict:
         out["qoq_pct"] = round((vals[-1] / vals[-2] - 1) * 100, 2)
     if len(vals) >= 5 and vals[-5]:
         out["yoy_pct"] = round((vals[-1] / vals[-5] - 1) * 100, 2)
+    return out
+
+
+# ---------------------------------------------- 연간 핵심지표(논리명 → 태그 폴백)
+
+# 같은 항목이라도 회사마다 us-gaap 태그가 다르다. 호출부가 태그를 찍어 보내면
+# 태그가 어긋난 회사에서 통째로 빈손이 되므로, 여기서 논리명으로 받아 우선순위
+# 폴백까지 서버가 처리한다. 실제 채택된 태그는 tags{}로 되돌려 준다.
+_DUR_ITEMS: dict[str, list[str]] = {
+    "revenue": _REV_TAGS,
+    "operating_income": ["OperatingIncomeLoss"],
+    "net_income": ["NetIncomeLoss", "ProfitLoss"],
+    "dda": _DDA_TAGS,
+    "ocf": _OCF_TAGS,
+    "capex": _CAPEX_TAGS,
+    "dividends": ["PaymentsOfDividendsCommonStock",
+                  "PaymentsOfDividends",
+                  "PaymentsOfDividendsCommonStockIncludingSpinoff"],
+    "buybacks": ["PaymentsForRepurchaseOfCommonStock",
+                 "PaymentsForRepurchaseOfEquity"],
+}
+_INST_ITEMS: dict[str, list[str]] = {
+    "assets": ["Assets"],
+    "liabilities": ["Liabilities"],
+    "equity": ["StockholdersEquity",
+               "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+    "cash": ["CashAndCashEquivalentsAtCarryingValue",
+             "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
+    "debt_lt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "debt_st": ["LongTermDebtCurrent", "DebtCurrent", "ShortTermBorrowings"],
+}
+# 재무상태표 시점을 회계연도 종료일에 맞출 때 허용할 오차(일). 52/53주 결산 편차.
+_INSTANT_TOL = 8
+
+_ANNUAL_NOTE = (
+    "연간값은 기간 길이 350~380일인 사실만 채택한다(form 라벨이 아니라 실제 기간 "
+    "기준). 6개월 누적·3개월 단독이 같은 배열에 섞여 오는 문제를 서버에서 걸러낸 "
+    "결과이므로 그대로 쓰면 된다. dividends가 null이고 dividend_status가 "
+    "'not_tagged'면 배당 태그 후보가 전부 미공시라는 뜻으로, 무배당 기업일 "
+    "가능성이 높다(그 경우 retained는 배당 0으로 계산하고 "
+    "retained_assumes_no_dividend=true로 표시한다). 추정·보간은 하지 않는다."
+)
+
+
+def _annual_duration(facts: list[dict]) -> dict[int, dict]:
+    """duration 사실 → {회계연도: 연간 사실}. 연간 = 기간 350~380일.
+
+    같은 회계연도가 여러 제출본에 나오면 filed 최신본을 채택한다. 기간 길이로
+    거르므로 6개월 누적·3개월 단독이 섞여 들어와도 배제된다.
+    """
+    out: dict[int, dict] = {}
+    for r in xbrl.dedupe(facts):
+        start = r.get("start")
+        if start is None:
+            continue
+        if not (xbrl.FY_MIN_DAYS <= xbrl.span_days(start, r["end"])
+                <= xbrl.FY_MAX_DAYS):
+            continue
+        fy = xbrl.fy_label(r["end"])
+        prev = out.get(fy)
+        if prev is None or (r.get("filed") or date.min) >= (prev.get("filed") or date.min):
+            out[fy] = r
+    return out
+
+
+async def _facts_all(cik: str, tags: list[str]) -> list[tuple]:
+    """후보 태그를 **전부** 조회 → [(태그, 단위, 사실, 예외)] (우선순위 순).
+
+    첫 성공에서 멈추지 않는 이유: 태그가 404는 아닌데 옛 기간만 남아 있는 경우가
+    있다. 실측 예 — AAPL의 PaymentsOfDividendsCommonStock은 FY2016~2017 2개뿐이고
+    실제 배당은 PaymentsOfDividends(FY2013~2025)에 있다. 첫 성공을 채택하면
+    배당이 통째로 비어 누적유보가 계산되지 않는다.
+    """
+    res = await asyncio.gather(*[_facts(cik, t) for t in tags])
+    return [(t, u, f, e) for t, (u, f, e) in zip(tags, res)]
+
+
+def _pick_duration(cands: list[tuple], years: int):
+    """duration 후보 중 **최근 회계연도 커버리지가 가장 넓은** 태그를 채택한다.
+
+    반환 (태그, 단위, {fy: 사실}, 보충태그[]). 채택 태그에 빠진 회계연도는 다음
+    순위 후보로 메우고 어떤 태그를 썼는지 보충태그에 남긴다(같은 항목이라도
+    회사가 중간에 태그를 갈아타는 일이 있다).
+    """
+    scored = [(t, u, _annual_duration(f)) for t, u, f, e in cands if e is None]
+    scored = [x for x in scored if x[2]]
+    if not scored:
+        return None, None, {}, []
+    all_fy = sorted({fy for _, _, a in scored for fy in a})
+    recent = set(all_fy[-max(1, years):])
+    # max는 첫 최대값을 돌려주므로 동점이면 우선순위가 앞선 후보가 이긴다.
+    tag, unit, ann = max(scored, key=lambda x: len(recent & set(x[2])))
+    merged, extra = dict(ann), []
+    for t2, _u2, a2 in scored:
+        if t2 == tag:
+            continue
+        filled = [fy for fy in recent - set(merged) if fy in a2]
+        if filled:
+            merged.update({fy: a2[fy] for fy in filled})
+            extra.append(t2)
+    return tag, unit, merged, extra
+
+
+def _pick_instant(cands: list[tuple], years: int):
+    """instant 후보 중 최근 기간 사실이 가장 많은 태그를 채택한다. (태그, 사실목록)."""
+    best, best_tag, best_n = [], None, -1
+    for t, _u, f, e in cands:
+        if e is not None:
+            continue
+        rows = xbrl.dedupe(f, instant=True)
+        if not rows:
+            continue
+        cutoff = max(r["end"] for r in rows) - timedelta(days=366 * max(1, years))
+        n = sum(1 for r in rows if r["end"] >= cutoff)
+        if n > best_n:
+            best, best_tag, best_n = f, t, n
+    return best_tag, best
+
+
+def _fy_calendar(annuals: dict[str, dict[int, dict]]) -> dict[int, date]:
+    """{회계연도: 종료일}. 매출→순이익→영업이익 순으로 먼저 잡히는 것을 채택한다."""
+    cal: dict[int, date] = {}
+    for key in ("revenue", "net_income", "operating_income", "ocf"):
+        for fy, r in (annuals.get(key) or {}).items():
+            cal.setdefault(fy, r["end"])
+    return cal
+
+
+def _ratio(num, den, pct: bool = False, nd: int = 2):
+    """분모가 0·None이면 None. 추정하지 않는다."""
+    if num is None or not den:
+        return None
+    return round(num / den * (100.0 if pct else 1.0), nd)
+
+
+async def annual_metrics(ticker: str, years: int = 5) -> dict:
+    """연간 핵심지표 한 판 — 수익력·재무구조·주주환원을 회계연도별로 조립한다.
+
+    태그 폴백·연간값 추출·유도 필드를 서버에서 끝내 호출부가 us-gaap 태그를 알
+    필요가 없게 한다. 값을 모르면 null로 두고 errors[]에 사유를 남긴다.
+    """
+    out = _skeleton(ticker, tags={}, tag_fallbacks_used={}, unit=None,
+                    dividend_status=None, roe_avg_pct=None, note=_ANNUAL_NOTE)
+    cik = await _resolve(out, ticker)
+    if cik is None:
+        return out
+
+    dur_keys, inst_keys = list(_DUR_ITEMS), list(_INST_ITEMS)
+    fetched = await asyncio.gather(
+        *[_facts_all(cik, _DUR_ITEMS[k]) for k in dur_keys],
+        *[_facts_all(cik, _INST_ITEMS[k]) for k in inst_keys],
+    )
+    dur_c = dict(zip(dur_keys, fetched[:len(dur_keys)]))
+    inst_c = dict(zip(inst_keys, fetched[len(dur_keys):]))
+
+    annuals: dict[str, dict[int, dict]] = {}
+    units: dict[str, str | None] = {}
+    for k in dur_keys:
+        tag, unit, ann, extra = _pick_duration(dur_c[k], years)
+        out["tags"][k], annuals[k], units[k] = tag, ann, unit
+        if extra:
+            out["tag_fallbacks_used"][k] = extra
+        if tag is None:
+            out["errors"].append(err_item(
+                k, f"태그 후보 전부 미공시 또는 연간 사실 없음: {_DUR_ITEMS[k]}", "SEC"))
+
+    inst_facts: dict[str, list[dict]] = {}
+    for k in inst_keys:
+        tag, facts = _pick_instant(inst_c[k], years)
+        out["tags"][k], inst_facts[k] = tag, facts
+        if tag is None:
+            out["errors"].append(err_item(
+                k, f"태그 후보 전부 미공시: {_INST_ITEMS[k]}", "SEC"))
+
+    out["unit"] = units.get("revenue") or units.get("net_income")
+    cal = _fy_calendar(annuals)
+    if not cal:
+        out["errors"].append(err_item(
+            "series", "연간 사실(350~380일)이 없어 회계연도를 구성할 수 없음", "SEC"))
+        return out
+
+    # 배당 태그 후보가 전부 비었다 = 보통주 배당을 안 하는 기업일 가능성이 높다.
+    no_div_tag = out["tags"]["dividends"] is None
+    out["dividend_status"] = "not_tagged" if no_div_tag else "disclosed"
+
+    rows = []
+    for fy in sorted(cal)[-max(1, years):]:
+        end = cal[fy]
+        row: dict = {"fy": fy, "end": end.isoformat()}
+        restated = False
+        for k in dur_keys:
+            r = (annuals.get(k) or {}).get(fy)
+            row[k] = r["val"] if r else None
+            restated = restated or bool(r and r.get("restated"))
+        for k in inst_keys:
+            r = xbrl.pick_instant(inst_facts[k], end, tol_days=_INSTANT_TOL)
+            row[k] = r["val"] if r else None
+            restated = restated or bool(r and r.get("restated"))
+
+        # 현금유출 태그는 표준 부호가 양수지만 음수로 태깅하는 filer가 있다.
+        for k in ("capex", "dividends", "buybacks"):
+            if row[k] is not None:
+                row[k] = abs(row[k])
+
+        # Liabilities 미공시 기업(ORLY 등)은 자산−자본으로 복원한다.
+        row["liabilities_derived"] = False
+        if row["liabilities"] is None and None not in (row["assets"], row["equity"]):
+            row["liabilities"] = row["assets"] - row["equity"]
+            row["liabilities_derived"] = True
+
+        debt = [v for v in (row.pop("debt_lt"), row.pop("debt_st")) if v is not None]
+        row["debt_total"] = sum(debt) if debt else None
+        row["net_debt"] = (row["debt_total"] - row["cash"]
+                           if row["debt_total"] is not None and row["cash"] is not None
+                           else None)
+        row["ebitda"] = (row["operating_income"] + row["dda"]
+                         if None not in (row["operating_income"], row["dda"]) else None)
+        row["fcf"] = (row["ocf"] - row["capex"]
+                      if None not in (row["ocf"], row["capex"]) else None)
+        row["operating_margin_pct"] = _ratio(row["operating_income"], row["revenue"],
+                                             pct=True)
+        row["net_debt_to_ebitda"] = _ratio(row["net_debt"], row["ebitda"])
+
+        # 자기자본이 음수면(자사주 매입 누적 등) ROE는 부호가 뒤집혀 의미가 없다.
+        # 큰 음수 퍼센트를 내보내면 스크리닝에서 오판하므로 값을 만들지 않는다.
+        row["equity_negative"] = bool(row["equity"] is not None and row["equity"] <= 0)
+        row["roe_pct"] = None if row["equity_negative"] else _ratio(
+            row["net_income"], row["equity"], pct=True)
+
+        # 누적유보 = 순이익 − 배당 − 자사주. 배당 태그가 아예 없으면 0으로 두되
+        # 가정했다는 사실을 플래그로 남긴다(조용히 0으로 채우지 않는다).
+        div = 0.0 if (no_div_tag and row["dividends"] is None) else row["dividends"]
+        row["retained_assumes_no_dividend"] = bool(no_div_tag and row["dividends"] is None)
+        if None not in (row["net_income"], div, row["buybacks"]):
+            row["shareholder_returns"] = div + row["buybacks"]
+            row["retained"] = row["net_income"] - row["shareholder_returns"]
+        else:
+            row["shareholder_returns"] = None
+            row["retained"] = None
+        row["restated"] = restated
+        rows.append(row)
+
+    out["series"] = rows
+    roes = [r["roe_pct"] for r in rows if r["roe_pct"] is not None][-3:]
+    if roes:
+        out["roe_avg_pct"] = round(sum(roes) / len(roes), 2)
+    elif any(r["equity_negative"] for r in rows):
+        out["errors"].append(err_item(
+            "roe_avg_pct", "자기자본이 음수라 ROE가 의미를 갖지 못함 "
+            "(ROIC 등 대체 지표를 쓸 것)", "SEC"))
+    else:
+        out["errors"].append(err_item("roe_avg_pct",
+                                      "순이익·자기자본 공시가 부족해 ROE 평균을 "
+                                      "계산할 수 없음", "SEC"))
     return out

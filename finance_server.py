@@ -864,7 +864,8 @@ async def get_sec_fundamentals(ticker: str, concepts: list[str],
           results:[{concept, unit, series:[{fy, fp, form, start, end, val,
                     filed, accn, restated}]}],
           note, timestamp, source, data_kind:'filing', errors}.
-    태그가 하나뿐이면 concept/unit/series를 최상위에도 함께 넣어 준다.
+    ※ 태그가 여러 항목에 걸쳐 있고 회사마다 태그가 다르므로, 정형 지표가
+      필요하면 이 툴 대신 get_sec_annual_metrics를 쓸 것(폴백·연간 추출 포함).
     """
     t = (ticker or "").strip().upper()
 
@@ -872,6 +873,49 @@ async def get_sec_fundamentals(ticker: str, concepts: list[str],
         return await sec_metrics.fundamentals(t, concepts, years)
     key = f"sec_fund:{t}:{','.join(concepts or [])}:{years}"
     return await cached(key, fetch, _TTL_SEC, ttl_partial=_TTL_PARTIAL)
+
+
+@mcp.tool()
+async def get_sec_annual_metrics(ticker: str, years: int = 5) -> dict:
+    """미국 상장사 **연간 핵심지표 한 판** — 수익력·재무구조·주주환원. SEC_USER_AGENT 필요.
+
+    get_sec_fundamentals와 달리 **us-gaap 태그를 몰라도 된다.** 항목마다 태그 후보를
+    우선순위대로 시도하고(회사별 태그 편차 흡수) 실제 채택된 태그를 tags{}로 준다.
+    여러 종목을 스크리닝할 때 원자료 대신 이 툴을 쓰면 응답이 10분의 1로 줄어든다.
+
+    ticker: 미국 상장사 티커(예: 'ADBE', 'AAPL', 'ORLY').
+    years: 최근 N개 회계연도(기본 5).
+
+    연간값은 **기간 길이 350~380일인 사실만** 채택한다(form 라벨이 아니라 실제
+    기간 기준). 6개월 누적·3개월 단독이 같은 배열에 섞여 오는 문제를 서버가
+    걸러낸 결과라 그대로 합산해도 이중계상이 없다.
+
+    유도 필드(공시값이 없을 때만 만들고 플래그로 표시한다. 추정·보간은 없다):
+      liabilities   — 미공시 기업은 assets − equity로 복원(liabilities_derived=true)
+      debt_total    — 장기 + 유동성 장기부채 합
+      net_debt      — debt_total − cash
+      ebitda        — operating_income + dda
+      fcf           — ocf − capex
+      retained      — net_income − dividends − buybacks
+
+    ※ dividend_status='not_tagged'는 배당 태그 후보가 **전부** 미공시라는 뜻으로
+      무배당 기업일 가능성이 높다. 이 경우 dividends는 null로 두되 retained는
+      배당 0으로 계산하고 retained_assumes_no_dividend=true로 표시한다.
+    반환: {ticker, cik, entity_name, unit, tags{}, dividend_status, roe_avg_pct,
+          series:[{fy, end, revenue, operating_income, net_income, dda, ocf, capex,
+                   dividends, buybacks, assets, liabilities, equity, cash,
+                   debt_total, net_debt, ebitda, fcf, retained, shareholder_returns,
+                   roe_pct, operating_margin_pct, net_debt_to_ebitda,
+                   liabilities_derived, retained_assumes_no_dividend, restated}],
+          note, timestamp, source, data_kind:'filing', errors}.
+    roe_avg_pct는 최근 3개 회계연도 ROE의 단순평균이다.
+    """
+    t = (ticker or "").strip().upper()
+
+    async def fetch():
+        return await sec_metrics.annual_metrics(t, years)
+    return await cached(f"sec_annual:{t}:{years}", fetch, _TTL_SEC,
+                        ttl_partial=_TTL_PARTIAL)
 
 
 @mcp.tool()
