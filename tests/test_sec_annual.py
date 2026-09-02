@@ -16,7 +16,7 @@ from sources import sec, sec_metrics
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 CC = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/{tag}.json"
 CIK = "0001652044"
-YEARS = (2023, 2024, 2025)
+YEARS = (2022, 2023, 2024, 2025)
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +70,15 @@ def _base(**over):
         "NetCashProvidedByUsedInOperatingActivities": _annual({y: 300.0 for y in YEARS}),
         "PaymentsToAcquirePropertyPlantAndEquipment": _annual({y: 80.0 for y in YEARS}),
         "PaymentsForRepurchaseOfCommonStock": _annual({y: 30.0 for y in YEARS}),
+        "ResearchAndDevelopmentExpense": _annual({y: 150.0 for y in YEARS}),
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"
+        "NoncontrollingInterest": _annual({y: 125.0 for y in YEARS}),
+        "IncomeTaxExpenseBenefit": _annual({y: 25.0 for y in YEARS}),
+        # 희석주식수는 매년 10씩 감소(자사주 매입) — 3년 증가율 판정용.
+        "WeightedAverageNumberOfDilutedSharesOutstanding": _annual(
+            {y: 1000.0 - i * 10 for i, y in enumerate(YEARS)}),
+        "CommonStockSharesOutstanding": _instants(
+            {y: 990.0 - i * 10 for i, y in enumerate(YEARS)}),
         "Assets": _instants({y: 5000.0 for y in YEARS}),
         "Liabilities": _instants({y: 3000.0 for y in YEARS}),
         "StockholdersEquity": _instants({y: 2000.0 for y in YEARS}),
@@ -92,7 +101,7 @@ async def test_picks_dividend_tag_with_widest_coverage():
         PaymentsOfDividendsCommonStock=_annual({2016: 9.0, 2017: 9.0}),
         PaymentsOfDividends=_annual({y: 20.0 for y in YEARS}),
     ))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     assert r["tags"]["dividends"] == "PaymentsOfDividends"
     assert r["dividend_status"] == "disclosed"
     last = r["series"][-1]
@@ -107,13 +116,13 @@ async def test_fills_gap_years_from_lower_priority_tag():
     """회사가 중간에 태그를 갈아탄 경우 빠진 연도를 다음 후보로 메우고
     어떤 태그를 썼는지 남긴다."""
     _mock_universe(**_base(
-        PaymentsOfDividendsCommonStock=_annual({2023: 15.0, 2024: 15.0}),
+        PaymentsOfDividendsCommonStock=_annual({2022: 15.0, 2023: 15.0, 2024: 15.0}),
         PaymentsOfDividends=_annual({2025: 20.0}),
     ))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     assert r["tags"]["dividends"] == "PaymentsOfDividendsCommonStock"
     assert r["tag_fallbacks_used"]["dividends"] == ["PaymentsOfDividends"]
-    assert [s["dividends"] for s in r["series"]] == [15.0, 15.0, 20.0]
+    assert [s["dividends"] for s in r["series"]] == [15.0, 15.0, 15.0, 20.0]
 
 
 @respx.mock
@@ -121,7 +130,7 @@ async def test_no_dividend_tag_marks_status_and_assumes_zero():
     """배당 태그 후보가 전부 비면 무배당 기업일 가능성이 높다. 누적유보는
     배당 0으로 계산하되 가정했다는 사실을 플래그로 남긴다."""
     _mock_universe(**_base())          # 배당 태그 전부 404
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     assert r["tags"]["dividends"] is None
     assert r["dividend_status"] == "not_tagged"
     last = r["series"][-1]
@@ -140,9 +149,9 @@ async def test_ignores_half_year_and_quarter_facts():
     facts += [_dur("2025-01-01", "2025-06-30", 550.0, form="10-Q"),
               _dur("2025-07-01", "2025-09-30", 300.0, form="10-Q")]
     _mock_universe(**_base(Revenues=facts))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     assert [s["fy"] for s in r["series"]] == list(YEARS)
-    assert [s["revenue"] for s in r["series"]] == [1000.0, 1100.0, 1200.0]
+    assert [s["revenue"] for s in r["series"]] == [1000.0, 1100.0, 1200.0, 1300.0]
 
 
 # --------------------------------------------------------- 계산 불가 자리 ★
@@ -153,7 +162,7 @@ async def test_negative_equity_suppresses_roe():
     실측 ORLY는 자기자본 −7.6억 달러라 그대로 두면 −3258%가 나온다."""
     _mock_universe(**_base(
         StockholdersEquity=_instants({y: -500.0 for y in YEARS})))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     assert all(s["equity_negative"] is True for s in r["series"])
     assert all(s["roe_pct"] is None for s in r["series"])
     assert r["roe_avg_pct"] is None
@@ -164,7 +173,7 @@ async def test_negative_equity_suppresses_roe():
 async def test_derives_liabilities_when_untagged():
     """Liabilities를 태깅하지 않는 기업(실측 ORLY)은 자산−자본으로 복원한다."""
     _mock_universe(**_base(Liabilities=None))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     last = r["series"][-1]
     assert last["liabilities"] == 3000.0              # 5000 − 2000
     assert last["liabilities_derived"] is True
@@ -175,7 +184,7 @@ async def test_derives_liabilities_when_untagged():
 async def test_derived_fields_and_roe_average():
     _mock_universe(**_base(
         PaymentsOfDividends=_annual({y: 20.0 for y in YEARS})))
-    r = await srv.get_sec_annual_metrics("GOOGL", years=3)
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
     last = r["series"][-1]
     assert last["debt_total"] == 1000.0               # 장기 900 + 유동 100
     assert last["net_debt"] == 600.0                  # 1000 − 현금 400
@@ -186,3 +195,118 @@ async def test_derived_fields_and_roe_average():
     assert r["roe_avg_pct"] == 5.0
     assert r["unit"] == "USD" and r["data_kind"] == "filing"
     assert r["errors"] == []
+
+
+# --------------------------------------------------- 주식분할 소급 보정 ★
+
+def _dur_multi(vals_by_fy: dict[int, list[tuple]]):
+    """{fy: [(filed, val), ...]} → 제출본이 여럿인 연간 duration 사실 목록."""
+    return [_dur(f"{y}-01-01", f"{y}-12-31", v, filed=fd)
+            for y, pairs in vals_by_fy.items() for fd, v in pairs]
+
+
+@respx.mock
+async def test_split_adjusts_older_years_to_newest_basis():
+    """주식분할이 있으면 SEC 원자료에 분할 전/후 값이 둘 다 남는다. 최신 10-K가
+    소급 조정한 연도는 두 값이 공존하고 그 비율이 곧 관측된 분할 비율이다.
+    보정하지 않으면 실측 ORLY(15:1)처럼 3년 증가율이 +1,217%로 튄다."""
+    _mock_universe(**_base(
+        WeightedAverageNumberOfDilutedSharesOutstanding=_dur_multi({
+            2022: [("2023-02-28", 64.0)],                        # 옛 기준만
+            2023: [("2024-02-28", 61.0), ("2026-02-27", 915.0)],  # 공존 → 비율 15
+            2024: [("2026-02-27", 880.0)],
+            2025: [("2026-02-27", 856.0)],
+        })))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    shares = [s["shares_diluted"] for s in r["series"]]
+    assert shares == [960.0, 915.0, 880.0, 856.0]      # 64 × 15 = 960
+    assert r["series"][0]["shares_split_adjusted"] is True
+    assert r["series"][-1]["shares_split_adjusted"] is False
+    # 보정 전이라면 856/64-1 = +1,237%가 나온다.
+    assert r["shares_growth_3y_pct"] == -10.83
+
+
+@respx.mock
+async def test_small_restatement_is_not_treated_as_split():
+    """단순 정정(몇 % 차이)을 분할로 오인하면 옛 연도가 통째로 틀어진다."""
+    _mock_universe(**_base(
+        WeightedAverageNumberOfDilutedSharesOutstanding=_dur_multi({
+            2022: [("2023-02-28", 1000.0)],
+            2023: [("2024-02-28", 990.0), ("2026-02-27", 995.0)],   # 0.5% 정정
+            2024: [("2026-02-27", 980.0)],
+            2025: [("2026-02-27", 970.0)],
+        })))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    assert [s["shares_diluted"] for s in r["series"]] == [1000.0, 995.0, 980.0, 970.0]
+    assert all(s["shares_split_adjusted"] is False for s in r["series"])
+
+
+@respx.mock
+async def test_shares_outstanding_is_read_as_instant():
+    """CommonStockSharesOutstanding은 instant다. duration 후보에 두면 연간 사실
+    판정에서 영원히 걸러져 값이 잡히지 않는다."""
+    _mock_universe(**_base())
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    assert r["tags"]["shares_outstanding"] == "CommonStockSharesOutstanding"
+    assert [s["shares_outstanding"] for s in r["series"]] == [990.0, 980.0, 970.0, 960.0]
+
+
+# ------------------------------------------------------------ ROIC·실효세율 ★
+
+@respx.mock
+async def test_roic_and_effective_tax_rate():
+    _mock_universe(**_base())
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    last = r["series"][-1]
+    assert last["effective_tax_rate_pct"] == 20.0      # 세금 25 / 세전 125
+    assert last["nopat"] == 160.0                      # 영업이익 200 × 0.8
+    assert last["invested_capital"] == 2600.0          # net_debt 600 + 자본 2000
+    assert last["roic_pct"] == 6.15                    # 160 / 2600
+    assert r["roic_avg_pct"] == 6.15
+    assert last["rnd_to_revenue_pct"] == 11.54         # R&D 150 / 매출 1300
+
+
+@respx.mock
+async def test_roic_survives_negative_equity_when_capital_positive():
+    """자기자본이 음수여도 투하자본이 양수면 ROIC는 성립한다 — ROE 대체 경로."""
+    _mock_universe(**_base(
+        StockholdersEquity=_instants({y: -400.0 for y in YEARS})))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    last = r["series"][-1]
+    assert last["roe_pct"] is None and last["equity_negative"] is True
+    assert last["invested_capital"] == 200.0           # net_debt 600 − 400
+    assert last["roic_pct"] == 80.0                    # 160 / 200
+    assert r["roic_avg_pct"] == 80.0
+
+
+@respx.mock
+async def test_no_roic_when_invested_capital_not_positive():
+    """투하자본이 0 이하면 ROIC도 의미가 없다. 값을 만들지 않는다."""
+    _mock_universe(**_base(
+        StockholdersEquity=_instants({y: -900.0 for y in YEARS})))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    assert all(s["roic_pct"] is None for s in r["series"])
+    assert r["roic_avg_pct"] is None
+
+
+@respx.mock
+async def test_no_tax_rate_when_pretax_is_negative():
+    """적자연도의 실효세율은 부호가 뒤집혀 의미가 없다."""
+    _mock_universe(**_base(**{
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"
+        "NoncontrollingInterest": _annual({y: -50.0 for y in YEARS})}))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    assert all(s["effective_tax_rate_pct"] is None for s in r["series"])
+    assert all(s["roic_pct"] is None for s in r["series"])
+
+
+@respx.mock
+async def test_rnd_absent_is_not_an_error_for_the_rest():
+    """R&D를 공시하지 않는 업종(소매 등)이 있다. 나머지 항목은 계속 채운다."""
+    _mock_universe(**_base(ResearchAndDevelopmentExpense=None))
+    r = await srv.get_sec_annual_metrics("GOOGL", years=4)
+    assert r["tags"]["rnd"] is None
+    assert all(s["rnd"] is None and s["rnd_to_revenue_pct"] is None
+               for s in r["series"])
+    assert r["series"][-1]["roic_pct"] == 6.15         # 나머지는 정상
+    assert any(e["field"] == "rnd" for e in r["errors"])

@@ -34,7 +34,7 @@ Claude(Cowork/Desktop)의 WebSearch·WebFetch가 차단당하거나(네이버 �
 | `compare_valuation(tickers, metrics=None, normalize_krw=False)` | 국내·해외 **횡단 비교표**(최대 10종목, 자동 라우팅) | `["NVDA","000660"]` |
 | `get_implied_useful_life(ticker, years=3)` | 감가상각 **내용연수 역산**(연장/단축 감지) | `"AMZN"`, `"META"` |
 | `get_capex_series(ticker, quarters=8)` | 분기별 **CAPEX 실제 집행액**·OCF·FCF·매출대비 비중 | `"GOOGL"`, `8` |
-| `get_sec_annual_metrics(ticker, years=5)` | 연간 **핵심지표 한 판**(태그 폴백·유도 필드 포함) | `"ADBE"`, `5` |
+| `get_sec_annual_metrics(ticker, years=5)` | 연간 **핵심지표 한 판**(수익력·재무구조·주주환원·ROIC·주식수) | `"ADBE"`, `5` |
 | `get_sec_fundamentals(ticker, concepts, years=3)` | SEC XBRL **원자료**(us-gaap 태그 직접 조회) | `"NVDA"`, `["Revenues"]` |
 | `get_rpo_backlog(ticker, quarters=8)` | 잔여 이행의무(RPO) **수주잔고** | `"MSFT"` |
 | `get_credit_spreads(series=None, period="1y")` | 미국 **신용스프레드·금리곡선**(FRED, 백분위 포함) | — |
@@ -390,6 +390,17 @@ get_credit_spreads()                # percentile_1y/5y와 함께 읽을 것
 - `dividend_status='not_tagged'`는 배당 태그 후보가 **전부** 미공시라는 뜻으로
   무배당 기업일 가능성이 높다. 이때 `retained`는 배당 0으로 계산하며
   `retained_assumes_no_dividend=true`로 표시된다.
+- `shares_diluted`(기간 가중평균)와 `shares_outstanding`(회계연도 종료 시점)은
+  **금액이 아니라 주식 수**다. `unit` 필드는 금액 항목의 통화를 가리킨다.
+- **주식분할이 있으면 SEC 원자료에 분할 전/후 값이 둘 다 남아 시계열이 끊긴다.**
+  같은 연도에 공존하는 두 값의 비율(=관측된 분할 비율)로 옛 연도를 최신 기준에
+  맞추고 `shares_split_adjusted=true`로 표시한다. 실측 ORLY(15:1 분할)는 보정 전
+  3년 주식수 증가율이 **+1,217%**, 보정 후 **−12.16%**다.
+- `roic_pct`는 `영업이익×(1−실효세율) ÷ (net_debt + equity)`다. 자기자본이
+  음수여도 투하자본이 양수면 성립하므로 `equity_negative=true`인 종목의
+  **ROE 대체 지표**로 쓴다. 투하자본이 0 이하면 값을 만들지 않는다.
+- `effective_tax_rate_pct`는 세전이익이 **양수인 해에만** 낸다(적자연도는 부호가
+  뒤집혀 의미가 없다). 세전이익 자체는 `pretax_income`으로 제공된다.
 - `get_credit_spreads`의 `change_1m/3m`은 비율(%)이 아니라 **절대차(%p)**다.
 
 ### SEC EDGAR 설정

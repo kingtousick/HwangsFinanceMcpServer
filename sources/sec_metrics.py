@@ -429,6 +429,22 @@ _DUR_ITEMS: dict[str, list[str]] = {
                   "PaymentsOfDividendsCommonStockIncludingSpinoff"],
     "buybacks": ["PaymentsForRepurchaseOfCommonStock",
                  "PaymentsForRepurchaseOfEquity"],
+    # 희석주식수는 duration(기간 가중평균)이다. 시점 주식수는 아래 instant 쪽.
+    "shares_diluted": ["WeightedAverageNumberOfDilutedSharesOutstanding",
+                       "WeightedAverageNumberOfSharesOutstandingBasic",
+                       "WeightedAverageNumberOfShareOutstandingBasicAndDiluted"],
+    # ADBE는 ...SoftwareExcludingAcquiredInProcessCost를 쓴다(실측). R&D를 아예
+    # 공시하지 않는 업종(소매 등)도 있으므로 없는 것 자체가 정상일 수 있다.
+    "rnd": ["ResearchAndDevelopmentExpense",
+            "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost",
+            "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
+    "pretax_income": [
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"
+        "NoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAnd"
+        "IncomeLossFromEquityMethodInvestments",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic"],
+    "income_tax": ["IncomeTaxExpenseBenefit"],
 }
 _INST_ITEMS: dict[str, list[str]] = {
     "assets": ["Assets"],
@@ -439,6 +455,9 @@ _INST_ITEMS: dict[str, list[str]] = {
              "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
     "debt_lt": ["LongTermDebtNoncurrent", "LongTermDebt"],
     "debt_st": ["LongTermDebtCurrent", "DebtCurrent", "ShortTermBorrowings"],
+    # CommonStockSharesOutstanding은 instant다(start가 없다). duration 쪽에 두면
+    # 연간 사실 판정에서 영원히 걸러져 죽은 후보가 된다 — 실측으로 확인.
+    "shares_outstanding": ["CommonStockSharesOutstanding", "CommonStockSharesIssued"],
 }
 # 재무상태표 시점을 회계연도 종료일에 맞출 때 허용할 오차(일). 52/53주 결산 편차.
 _INSTANT_TOL = 8
@@ -449,7 +468,11 @@ _ANNUAL_NOTE = (
     "결과이므로 그대로 쓰면 된다. dividends가 null이고 dividend_status가 "
     "'not_tagged'면 배당 태그 후보가 전부 미공시라는 뜻으로, 무배당 기업일 "
     "가능성이 높다(그 경우 retained는 배당 0으로 계산하고 "
-    "retained_assumes_no_dividend=true로 표시한다). 추정·보간은 하지 않는다."
+    "retained_assumes_no_dividend=true로 표시한다). "
+    "★ shares_diluted/shares_outstanding은 unit이 아니라 **주식 수**다(금액 아님). "
+    "shares_diluted는 기간 가중평균, shares_outstanding은 회계연도 종료 시점 값. "
+    "roic_pct는 영업이익x(1-실효세율)/(net_debt+equity)이며 투하자본이 0 이하면 "
+    "만들지 않는다. 추정·보간은 하지 않는다."
 )
 
 
@@ -528,6 +551,86 @@ def _pick_instant(cands: list[tuple], years: int):
     return best_tag, best
 
 
+# 분할 보정: 정수배(또는 그 역수)와 이만큼 이내로 맞아떨어져야 분할로 인정한다.
+# 단순 정정(수치가 몇 % 바뀌는 것)을 분할로 오인하지 않기 위한 문턱이다.
+_SPLIT_TOL = 0.005
+
+
+def _is_split_ratio(r: float) -> bool:
+    """주식분할 비율로 인정할 수 있는 값인지. 2:1, 15:1, 1:10(병합) 등."""
+    if not r or r <= 0:
+        return False
+    for cand in (r, 1.0 / r):
+        n = round(cand)
+        if n >= 2 and abs(cand / n - 1.0) <= _SPLIT_TOL:
+            return True
+    return False
+
+
+def _variants(rows_by_fy: dict[int, list[tuple]]) -> dict[int, float]:
+    """회계연도별 주식수 보정 계수. 같은 기준(최신 제출본)으로 맞춘다.
+
+    주식분할이 있으면 SEC 원자료에 분할 전/후 값이 **둘 다** 남는다. 최신 10-K가
+    소급 조정한 연도는 분할 후 값이 함께 실리지만, 그보다 오래된 연도는 옛 기준
+    값만 있어 그대로 이으면 시계열이 끊긴다(실측 ORLY: FY2022 64,962,000 →
+    FY2023 914,976,000). 같은 연도에 공존하는 두 값의 비율이 곧 관측된 분할
+    비율이므로(ORLY는 정확히 15.0), 그것을 옛 연도에 적용한다. 추정이 아니다.
+
+    rows_by_fy: {회계연도: [(제출일, 값), ...]}  →  {회계연도: 곱할 계수}
+    """
+    filed_all = [f for vs in rows_by_fy.values() for f, _v in vs if f]
+    if not filed_all:
+        return {fy: 1.0 for fy in rows_by_fy}
+    newest = max(filed_all)
+    scales: dict[int, float] = {}
+    scale, carry = 1.0, 1.0
+    for fy in sorted(rows_by_fy, reverse=True):
+        vs = [(f, v) for f, v in rows_by_fy[fy] if v]
+        if not vs:
+            scales[fy] = carry
+            continue
+        latest_filed, chosen = max(vs)
+        on_newest_basis = latest_filed == newest
+        scales[fy] = scale if on_newest_basis else carry
+        distinct = {v for _f, v in vs}
+        if len(distinct) > 1:
+            old = min(distinct)
+            r = chosen / old
+            if _is_split_ratio(r):
+                carry = scales[fy] * r
+    return scales
+
+
+def _dur_variants(facts: list[dict]) -> dict[int, list[tuple]]:
+    """연간 duration 사실을 제출본별로 모은다(분할 보정용). {fy: [(filed, val)]}."""
+    out: dict[int, list[tuple]] = {}
+    for f in facts or []:
+        start, end = xbrl.parse_dt(f.get("start")), xbrl.parse_dt(f.get("end"))
+        val = f.get("val")
+        if not start or not end or not isinstance(val, (int, float)):
+            continue
+        if not (xbrl.FY_MIN_DAYS <= xbrl.span_days(start, end) <= xbrl.FY_MAX_DAYS):
+            continue
+        out.setdefault(xbrl.fy_label(end), []).append(
+            (xbrl.parse_dt(f.get("filed")) or date.min, float(val)))
+    return out
+
+
+def _inst_variants(facts: list[dict], cal: dict[int, date]) -> dict[int, list[tuple]]:
+    """회계연도 종료 시점 instant 사실을 제출본별로 모은다. {fy: [(filed, val)]}."""
+    out: dict[int, list[tuple]] = {}
+    for f in facts or []:
+        end, val = xbrl.parse_dt(f.get("end")), f.get("val")
+        if not end or not isinstance(val, (int, float)):
+            continue
+        for fy, fy_end in cal.items():
+            if abs((end - fy_end).days) <= _INSTANT_TOL:
+                out.setdefault(fy, []).append(
+                    (xbrl.parse_dt(f.get("filed")) or date.min, float(val)))
+                break
+    return out
+
+
 def _fy_calendar(annuals: dict[str, dict[int, dict]]) -> dict[int, date]:
     """{회계연도: 종료일}. 매출→순이익→영업이익 순으로 먼저 잡히는 것을 채택한다."""
     cal: dict[int, date] = {}
@@ -551,7 +654,8 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
     필요가 없게 한다. 값을 모르면 null로 두고 errors[]에 사유를 남긴다.
     """
     out = _skeleton(ticker, tags={}, tag_fallbacks_used={}, unit=None,
-                    dividend_status=None, roe_avg_pct=None, note=_ANNUAL_NOTE)
+                    dividend_status=None, roe_avg_pct=None, roic_avg_pct=None,
+                    shares_growth_3y_pct=None, note=_ANNUAL_NOTE)
     cik = await _resolve(out, ticker)
     if cik is None:
         return out
@@ -566,9 +670,12 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
 
     annuals: dict[str, dict[int, dict]] = {}
     units: dict[str, str | None] = {}
+    dur_facts: dict[str, list[dict]] = {}
     for k in dur_keys:
         tag, unit, ann, extra = _pick_duration(dur_c[k], years)
         out["tags"][k], annuals[k], units[k] = tag, ann, unit
+        dur_facts[k] = next((f for t, _u, f, e in dur_c[k]
+                             if t == tag and e is None), [])
         if extra:
             out["tag_fallbacks_used"][k] = extra
         if tag is None:
@@ -589,6 +696,14 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
         out["errors"].append(err_item(
             "series", "연간 사실(350~380일)이 없어 회계연도를 구성할 수 없음", "SEC"))
         return out
+
+    # 주식수는 분할이 있으면 분할 전/후 기준이 섞인다. 같은 연도에 공존하는 두
+    # 값의 비율로 옛 연도를 최신 기준에 맞춘다(_variants 참고).
+    shares_scale = {
+        "shares_diluted": _variants(_dur_variants(dur_facts.get("shares_diluted", []))),
+        "shares_outstanding": _variants(
+            _inst_variants(inst_facts.get("shares_outstanding", []), cal)),
+    }
 
     # 배당 태그 후보가 전부 비었다 = 보통주 배당을 안 하는 기업일 가능성이 높다.
     no_div_tag = out["tags"]["dividends"] is None
@@ -613,6 +728,14 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
             if row[k] is not None:
                 row[k] = abs(row[k])
 
+        # 주식분할 소급 보정. 계수가 1이 아니면 옛 기준 값을 최신 기준으로 옮긴 것이다.
+        row["shares_split_adjusted"] = False
+        for k in ("shares_diluted", "shares_outstanding"):
+            sc = shares_scale[k].get(fy, 1.0)
+            if row[k] is not None and sc != 1.0:
+                row[k] = row[k] * sc
+                row["shares_split_adjusted"] = True
+
         # Liabilities 미공시 기업(ORLY 등)은 자산−자본으로 복원한다.
         row["liabilities_derived"] = False
         if row["liabilities"] is None and None not in (row["assets"], row["equity"]):
@@ -632,11 +755,30 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
                                              pct=True)
         row["net_debt_to_ebitda"] = _ratio(row["net_debt"], row["ebitda"])
 
+        row["rnd_to_revenue_pct"] = _ratio(row["rnd"], row["revenue"], pct=True)
+
         # 자기자본이 음수면(자사주 매입 누적 등) ROE는 부호가 뒤집혀 의미가 없다.
         # 큰 음수 퍼센트를 내보내면 스크리닝에서 오판하므로 값을 만들지 않는다.
         row["equity_negative"] = bool(row["equity"] is not None and row["equity"] <= 0)
         row["roe_pct"] = None if row["equity_negative"] else _ratio(
             row["net_income"], row["equity"], pct=True)
+
+        # 실효세율은 세전이익이 양수일 때만 의미가 있다(적자연도는 부호가 뒤집힌다).
+        eff = (_ratio(row["income_tax"], row["pretax_income"])
+               if (row["pretax_income"] or 0) > 0 else None)
+        row["effective_tax_rate_pct"] = None if eff is None else round(eff * 100, 2)
+
+        # ROIC = 영업이익x(1-실효세율) / 투하자본(net_debt + equity).
+        # 자기자본이 음수여도 투하자본이 양수면 성립하므로 ROE 대신 쓸 수 있다.
+        invested = (row["net_debt"] + row["equity"]
+                    if None not in (row["net_debt"], row["equity"]) else None)
+        row["invested_capital"] = invested
+        if eff is not None and row["operating_income"] is not None and (invested or 0) > 0:
+            row["nopat"] = row["operating_income"] * (1.0 - eff)
+            row["roic_pct"] = round(row["nopat"] / invested * 100, 2)
+        else:
+            row["nopat"] = None
+            row["roic_pct"] = None
 
         # 누적유보 = 순이익 − 배당 − 자사주. 배당 태그가 아예 없으면 0으로 두되
         # 가정했다는 사실을 플래그로 남긴다(조용히 0으로 채우지 않는다).
@@ -652,6 +794,20 @@ async def annual_metrics(ticker: str, years: int = 5) -> dict:
         rows.append(row)
 
     out["series"] = rows
+
+    # 피셔 13(주주 희석) 판정 근거. 3개 회계연도 전 대비 희석주식수 증가율.
+    if len(rows) >= 4 and rows[-4]["shares_diluted"] and rows[-1]["shares_diluted"]:
+        out["shares_growth_3y_pct"] = round(
+            (rows[-1]["shares_diluted"] / rows[-4]["shares_diluted"] - 1) * 100, 2)
+    else:
+        out["errors"].append(err_item(
+            "shares_growth_3y_pct",
+            "희석주식수가 4개 회계연도치 모이지 않아 3년 증가율을 낼 수 없음", "SEC"))
+
+    roics = [r["roic_pct"] for r in rows if r["roic_pct"] is not None][-3:]
+    if roics:
+        out["roic_avg_pct"] = round(sum(roics) / len(roics), 2)
+
     roes = [r["roe_pct"] for r in rows if r["roe_pct"] is not None][-3:]
     if roes:
         out["roe_avg_pct"] = round(sum(roes) / len(roes), 2)

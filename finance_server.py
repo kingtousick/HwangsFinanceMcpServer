@@ -897,18 +897,36 @@ async def get_sec_annual_metrics(ticker: str, years: int = 5) -> dict:
       ebitda        — operating_income + dda
       fcf           — ocf − capex
       retained      — net_income − dividends − buybacks
+      effective_tax_rate_pct — income_tax ÷ pretax_income (세전이익 양수일 때만)
+      nopat / roic_pct       — 영업이익×(1−실효세율) ÷ (net_debt + equity)
+                               투하자본이 0 이하면 만들지 않는다
+
+    ※ shares_diluted(기간 가중평균)와 shares_outstanding(회계연도 종료 시점)은
+      **금액이 아니라 주식 수**다(unit 필드는 금액 항목의 통화다).
+      주식분할이 있으면 SEC 원자료에 분할 전/후 값이 둘 다 남아 시계열이 끊긴다.
+      같은 연도에 공존하는 두 값의 비율(=관측된 분할 비율)로 옛 연도를 최신 기준에
+      맞추고 shares_split_adjusted=true로 표시한다. 실측 ORLY(15:1 분할)는 보정
+      전 3년 증가율이 +1,217%로 나왔고 보정 후 −12.16%다.
+    ※ roe_pct가 null이고 equity_negative=true면 자기자본이 음수라 ROE가 의미를
+      갖지 못한다는 뜻이다(자사주 매입 누적 등). roic_pct로 대체 판단할 것.
 
     ※ dividend_status='not_tagged'는 배당 태그 후보가 **전부** 미공시라는 뜻으로
       무배당 기업일 가능성이 높다. 이 경우 dividends는 null로 두되 retained는
       배당 0으로 계산하고 retained_assumes_no_dividend=true로 표시한다.
     반환: {ticker, cik, entity_name, unit, tags{}, dividend_status, roe_avg_pct,
+          roic_avg_pct, shares_growth_3y_pct,
           series:[{fy, end, revenue, operating_income, net_income, dda, ocf, capex,
-                   dividends, buybacks, assets, liabilities, equity, cash,
-                   debt_total, net_debt, ebitda, fcf, retained, shareholder_returns,
-                   roe_pct, operating_margin_pct, net_debt_to_ebitda,
-                   liabilities_derived, retained_assumes_no_dividend, restated}],
+                   dividends, buybacks, rnd, pretax_income, income_tax,
+                   shares_diluted, shares_outstanding,
+                   assets, liabilities, equity, cash, debt_total, net_debt,
+                   invested_capital, ebitda, fcf, nopat, retained,
+                   shareholder_returns, roe_pct, roic_pct, effective_tax_rate_pct,
+                   operating_margin_pct, rnd_to_revenue_pct, net_debt_to_ebitda,
+                   liabilities_derived, retained_assumes_no_dividend,
+                   equity_negative, shares_split_adjusted, restated}],
           note, timestamp, source, data_kind:'filing', errors}.
-    roe_avg_pct는 최근 3개 회계연도 ROE의 단순평균이다.
+    roe_avg_pct/roic_avg_pct는 최근 3개 회계연도의 단순평균,
+    shares_growth_3y_pct는 3개 회계연도 전 대비 희석주식수 증가율이다(주주 희석 판정용).
     """
     t = (ticker or "").strip().upper()
 
