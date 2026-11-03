@@ -400,7 +400,7 @@ _G2B_JSON = {"response": {"header": {"resultCode": "00", "resultMsg": "정상"},
          "bidNtceNm": "수도권광역급행철도 A노선 OO공구 건설공사",
          "ntceInsttNm": "국가철도공단", "dminsttNm": "국토교통부",
          "bidNtceDt": "2026-06-20 10:00:00", "opengDt": "2026-07-01 11:00:00",
-         "presmptPrce": "120000000000", "asignBdgtAmt": "150000000000",
+         "presmptPrce": "120000000000", "bdgtAmt": "150000000000",   # 공사는 bdgtAmt
          "bidNtceUrl": "https://www.g2b.go.kr/x"}]}}}
 
 
@@ -415,10 +415,14 @@ async def test_construction_bids_ok(monkeypatch):
     b = res["bids"][0]
     assert b["공고번호"] == "20260601234"
     assert b["추정가격"] == 120000000000.0
+    assert b["배정예산"] == 150000000000.0
     assert b["발주기관"] == "국가철도공단"
     assert res["scanned"] >= 1
     # 서버가 키워드 필터를 무시하므로 bidNtceNm을 보내지 않고 날짜범위만 조회한다.
     assert route.call_count >= 1
+    # 2026-11 조달청 개편 URL(BidPublicInfoService02 / ...Cnstwk02)로 호출해야 한다.
+    assert route.calls[0].request.url.path == (
+        "/1230000/ad/BidPublicInfoService02/getBidPblancListInfoCnstwk02")
     params = route.calls[0].request.url.params
     assert "bidNtceNm" not in params
     assert params["inqryBgnDt"] and params["inqryEndDt"]

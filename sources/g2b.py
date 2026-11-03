@@ -4,7 +4,10 @@
 응답은 JSON(type=json).
 
 엔드포인트(공공데이터포털 1230000 조달청 입찰공고정보서비스, data.go.kr/data/15129394):
-  공사 입찰공고: {BASE}/getBidPblancListInfoCnstwk
+  공사 입찰공고: {BASE}/getBidPblancListInfoCnstwk02
+  (2026-11 조달청 개편: BASE에 '02', 각 오퍼레이션명 끝에 '02' 추가. 구 URL은 공지 후 90일
+   유지 후 중단. 가산지역·공동도급의무지역·부공종·첨부파일 항목은 별도 오퍼레이션으로
+   분리됐으나 이 모듈은 해당 항목을 쓰지 않는다. 기존 인증키·활용신청 그대로 동작 실측 확인.)
 파라미터: serviceKey, type=json, numOfRows, pageNo,
           inqryDiv=1(공고게시일시 기준), inqryBgnDt/inqryEndDt(YYYYMMDDHHMM).
 
@@ -28,10 +31,10 @@ from core.schema import to_float
 
 KST = timezone(timedelta(hours=9))
 
-_BASE = "https://apis.data.go.kr/1230000/ad/BidPublicInfoService"
-_OP_CNSTWK = "getBidPblancListInfoCnstwk"   # 공사
-_OP_SERVC = "getBidPblancListInfoServc"     # 용역(설계/감리 등)
-_OP_THNG = "getBidPblancListInfoThng"       # 물품
+_BASE = "https://apis.data.go.kr/1230000/ad/BidPublicInfoService02"
+_OP_CNSTWK = "getBidPblancListInfoCnstwk02"   # 공사
+_OP_SERVC = "getBidPblancListInfoServc02"     # 용역(설계/감리 등)
+_OP_THNG = "getBidPblancListInfoThng02"       # 물품
 
 _BIZ_OP = {"공사": _OP_CNSTWK, "용역": _OP_SERVC, "물품": _OP_THNG}
 
@@ -99,7 +102,8 @@ def _bid(it: dict) -> dict:
         "입찰마감": it.get("bidClseDt"),
         "개찰일": it.get("opengDt"),
         "추정가격": to_float(it.get("presmptPrce")),       # 원
-        "배정예산": to_float(it.get("asignBdgtAmt")),      # 원
+        # 용역/물품은 asignBdgtAmt, 공사는 bdgtAmt로 내려온다(실측: 공사 응답엔 asignBdgtAmt 없음).
+        "배정예산": to_float(it.get("asignBdgtAmt") or it.get("bdgtAmt")),   # 원
         "발주기관": it.get("ntceInsttNm"),
         "수요기관": it.get("dminsttNm"),
         "지역제한": it.get("rgnLmtBidLocplcJdgmBssNm"),
